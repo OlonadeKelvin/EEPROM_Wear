@@ -8,6 +8,7 @@ NUM_BLOCKS = 4
 async def reset_dut(dut):
     dut.rst_n.value = 0
     dut.ui_in.value = 0
+    dut.uio_in.value = 0
     dut.ena.value = 1
     await Timer(100, units="ns")
     dut.rst_n.value = 1

@@ -62,16 +62,12 @@ module tt_um_wearlevel_controller (
     wire [2:0] req_phys = map[addr];
 
     // --------------------------------------------------------
-    // Combinational min-search (unrolled, no loop)
+    // Combinational min-search (unrolled for 4 blocks)
     // --------------------------------------------------------
     wire [CNT_WIDTH-1:0] cnt0 = wr_count[0];
     wire [CNT_WIDTH-1:0] cnt1 = wr_count[1];
     wire [CNT_WIDTH-1:0] cnt2 = wr_count[2];
     wire [CNT_WIDTH-1:0] cnt3 = wr_count[3];
-    wire [CNT_WIDTH-1:0] cnt4 = wr_count[4];
-    wire [CNT_WIDTH-1:0] cnt5 = wr_count[5];
-    wire [CNT_WIDTH-1:0] cnt6 = wr_count[6];
-    wire [CNT_WIDTH-1:0] cnt7 = wr_count[7];
 
     // Cascade comparison
     wire [CNT_WIDTH-1:0] min01 = (cnt0 < cnt1) ? cnt0 : cnt1;
@@ -80,20 +76,8 @@ module tt_um_wearlevel_controller (
     wire [CNT_WIDTH-1:0] min23 = (cnt2 < cnt3) ? cnt2 : cnt3;
     wire [2:0]           idx23 = (cnt2 < cnt3) ? 3'd2 : 3'd3;
 
-    wire [CNT_WIDTH-1:0] min45 = (cnt4 < cnt5) ? cnt4 : cnt5;
-    wire [2:0]           idx45 = (cnt4 < cnt5) ? 3'd4 : 3'd5;
-
-    wire [CNT_WIDTH-1:0] min67 = (cnt6 < cnt7) ? cnt6 : cnt7;
-    wire [2:0]           idx67 = (cnt6 < cnt7) ? 3'd6 : 3'd7;
-
-    wire [CNT_WIDTH-1:0] min0123 = (min01 < min23) ? min01 : min23;
-    wire [2:0]           idx0123 = (min01 < min23) ? idx01 : idx23;
-
-    wire [CNT_WIDTH-1:0] min4567 = (min45 < min67) ? min45 : min67;
-    wire [2:0]           idx4567 = (min45 < min67) ? idx45 : idx67;
-
-    wire [CNT_WIDTH-1:0] min_val_comb = (min0123 < min4567) ? min0123 : min4567;
-    wire [2:0]           min_idx_comb = (min0123 < min4567) ? idx0123 : idx4567;
+    wire [CNT_WIDTH-1:0] min_val_comb = (min01 < min23) ? min01 : min23;
+    wire [2:0]           min_idx_comb = (min01 < min23) ? idx01 : idx23;
 
     // --------------------------------------------------------
     // Combinational find logical block for a physical index
@@ -103,7 +87,7 @@ module tt_um_wearlevel_controller (
     integer i;
     always @* begin
         swap_logical = 3'd0;
-        for (j = 0; j < 8; j = j+1)
+        for (j = 0; j < NUM_BLOCKS; j = j+1)
             if (map[j] == min_idx_reg)
                 swap_logical = j[2:0];
     end
@@ -125,7 +109,7 @@ module tt_um_wearlevel_controller (
             swap_logical_reg <= 0;
             remap_needed <= 1'b0;
             // initialise mapping and counters
-            for (i = 0; i < 8; i = i+1) begin
+            for (i = 0; i < NUM_BLOCKS; i = i+1) begin
                 map[i] <= i[2:0];
                 wr_count[i] <= 0;
             end
