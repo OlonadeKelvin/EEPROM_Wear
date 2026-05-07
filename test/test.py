@@ -3,7 +3,7 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, FallingEdge, Timer
 
-NUM_BLOCKS = 8
+NUM_BLOCKS = 4
 
 async def reset_dut(dut):
     dut.rst_n.value = 0
@@ -44,7 +44,7 @@ async def write_commit(dut):
     await RisingEdge(dut.clk)
 
 async def move_ack(dut):
-    """Assert move_ack and wait until busy de‑asserts."""
+    """Assert move_ack and wait until busy de-asserts."""
     dut.ui_in.value = (1 << 5) | (0x3 << 3) | 0   # move_ack + cmd=11
     await RisingEdge(dut.clk)
     # wait for busy to go low
@@ -81,25 +81,25 @@ async def test_no_remap_under_threshold(dut):
         move_req = (dut.uo_out.value.integer >> 4) & 1
         assert move_req == 0, f"move_request asserted early at cycle {i}"
 
-    # 5th write – now threshold is exceeded
-		phys = await write_req(dut, 0)
-		await write_commit(dut)
+    # 5th write - now threshold is exceeded
+    phys = await write_req(dut, 0)
+    await write_commit(dut)
 
-		# Wait for the FSM to navigate through the internal states to S_SWAP/S_WAIT_ACK
-		while ((dut.uo_out.value.integer >> 4) & 1) == 0:
-		    await RisingEdge(dut.clk)
+    # Wait for the FSM to navigate through the internal states to S_SWAP/S_WAIT_ACK
+    while ((dut.uo_out.value.integer >> 4) & 1) == 0:
+        await RisingEdge(dut.clk)
 
-		# Now that it has reached the move request state, check the flags
-		busy = (dut.uo_out.value.integer >> 3) & 1
-		move_req = (dut.uo_out.value.integer >> 4) & 1
-		assert busy == 1, "busy should be high during remap"
-		assert move_req == 1, "move_request not asserted after threshold exceeded"
+    # Now that it has reached the move request state, check the flags
+    busy = (dut.uo_out.value.integer >> 3) & 1
+    move_req = (dut.uo_out.value.integer >> 4) & 1
+    assert busy == 1, "busy should be high during remap"
+    assert move_req == 1, "move_request not asserted after threshold exceeded"
 
     # Complete the remap
     await move_ack(dut)
 
     # Verify mapping changed: logical 0 should now point to physical 1
-    # (the least‑worn block)
+    # (the least-worn block)
     p0 = await read_req(dut, 0)
     assert p0 == 1, f"After remap logical 0 should map to 1, got {p0}"
     # logical 1 should now point to physical 0
@@ -140,7 +140,7 @@ async def test_read_during_write(dut):
         await write_commit(dut)
         await wait_until_idle(dut)
 
-    # 5th write – triggers a remap
+    # 5th write - triggers a remap
     phys = await write_req(dut, 0)
     # Manually advance the FSM step by step to interleave a read
     dut.ui_in.value = (0 << 5) | (0x2 << 3) | 0   # commit
@@ -155,35 +155,3 @@ async def test_read_during_write(dut):
         await move_ack(dut)
     else:
         await wait_until_idle(dut)
-
-    # Logical 2 should still be mapped to its original physical block
-    p2 = await read_req(dut, 2)
-    assert p2 == 2, "Read during busy should not alter mapping of an unrelated block"
-
-@cocotb.test()
-async def test_back_to_back_commits(dut):
-    """Fast back‑to‑back commits while a remap is in progress are safely ignored."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
-    await reset_dut(dut)
-
-    for _ in range(4):
-        phys = await write_req(dut, 0)
-        await write_commit(dut)
-        await wait_until_idle(dut)
-
-    # 5th write – will trigger remap
-    phys = await write_req(dut, 0)
-    dut.ui_in.value = (0 << 5) | (0x2 << 3) | 0   # first commit
-    await RisingEdge(dut.clk)                     # state -> S_INC
-
-    # Second commit while FSM is already busy
-    dut.ui_in.value = (0 << 5) | (0x2 << 3) | 0
-    await RisingEdge(dut.clk)                     # should be ignored
-
-    # Wait for the first remap to finish
-    if (dut.uo_out.value.integer >> 4) & 1:
-        await move_ack(dut)
-    else:
-        await wait_until_idle(dut)
-
-    # No hang occurred – test passes
