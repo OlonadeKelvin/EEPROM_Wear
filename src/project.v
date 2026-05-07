@@ -18,7 +18,7 @@ module tt_um_wearlevel_controller (
 );
 
     // Parameters
-    localparam NUM_BLOCKS = 8;
+    localparam NUM_BLOCKS = 4;
     localparam THRESHOLD  = 4;
     localparam CNT_WIDTH  = 16;
 
