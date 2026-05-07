@@ -1,26 +1,50 @@
 project:
   title: "Hardware EEPROM Wear-Leveling Controller"
-  author: "	Olonade Kelvin"
+  author: "Olonade Kelvin"
   description: >
     A fully digital wear‑leveling FSM for external EEPROM or flash memories.
     It implements dynamic wear‑levelling with configurable threshold and
     automatic logical‑to‑physical remapping. Ideal for edge‑device storage
     reliability enhancement.
-  documentation: "https://github.com/OlonadeKelvin/EEPROM_Wear"
-  language: "verilog"
-  top_module: "tt_um_wearlevel_controller"
-  version: "1.0"
+  tiles: "sky130"                     # Tile type for SKY26b (SkyWater 130 nm)
+  source_files:
+    - src/project.v
+  clock_hz: 10_000_000                # 10 MHz, easily meets timing
+  top_module: tt_um_wearlevel_controller
+  language: verilog
 
 pinout:
-  "ui_in[2:0]":   "logical block address"
-  "ui_in[4:3]":   "command (00=read, 01=write_req, 10=write_commit, 11=move_ack)"
-  "ui_in[5]":     "move_ack (asserted by host to confirm data move)"
-  "uo_out[2:0]":  "physical block address"
-  "uo_out[3]":    "busy (active high during write‑commit sequence)"
-  "uo_out[4]":    "move_request (asserted when data relocation is needed)"
-  "uio_out[2:0]": "destination physical address during move"
-  "uio_oe[2:0]":  "output enable for uio_out (0b111 during move)"
+  # Inputs (ui[7:0] = ui_in in verilog)
+  ui[0]: "Logical address bit 0"
+  ui[1]: "Logical address bit 1"
+  ui[2]: "Logical address bit 2"
+  ui[3]: "Command bit 0"
+  ui[4]: "Command bit 1"
+  ui[5]: "move_ack (host acknowledges data move)"
+  ui[6]: "Unused"
+  ui[7]: "Unused"
 
-clocks:
-  - name: "clk"
-    freq: "10 MHz"
+  # Outputs (uo[7:0] = uo_out)
+  uo[0]: "Physical address bit 0"
+  uo[1]: "Physical address bit 1"
+  uo[2]: "Physical address bit 2"
+  uo[3]: "Busy flag (high during write‑commit sequence)"
+  uo[4]: "move_request (high when data relocation is needed)"
+  uo[5]: "Unused"
+  uo[6]: "Unused"
+  uo[7]: "Unused"
+
+  # Bidirectional (uio[7:0] = uio_in / uio_out / uio_oe)
+  uio[0]: "Destination physical address bit 0 (output during move)"
+  uio[1]: "Destination physical address bit 1 (output during move)"
+  uio[2]: "Destination physical address bit 2 (output during move)"
+  uio[3]: "Unused (bidir, output enable 0)"
+  uio[4]: "Unused"
+  uio[5]: "Unused"
+  uio[6]: "Unused"
+  uio[7]: "Unused"
+
+  # Control signals
+  ena: "Enable signal (active high)"
+  clk: "Clock input"
+  rst_n: "Active-low reset"
