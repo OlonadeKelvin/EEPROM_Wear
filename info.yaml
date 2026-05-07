@@ -1,56 +1,28 @@
-# Tiny Tapeout project information
+# info.yaml for OpenLane / Tiny Tapeout
+
 project:
-  title:        ""      # Project title
-  author:       ""      # Your name
-  discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  ""      # One line description of what your project does
-  language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     0       # Clock frequency in Hz (or 0 if not applicable)
+  title: "Hardware EEPROM Wear-Leveling Controller"
+  author: "Your Name"
+  description: >
+    A fully digital wear‑leveling FSM for external EEPROM or flash memories.
+    It implements dynamic wear‑levelling with configurable threshold and
+    automatic logical‑to‑physical remapping. Ideal for edge‑device storage
+    reliability enhancement.
+  documentation: "https://github.com/your-repo/wearlevel-controller"
+  language: "verilog"
+  top_module: "tt_um_wearlevel_controller"
+  version: "1.0"
 
-  # How many tiles your design occupies? A single tile is about 167x108 uM.
-  tiles: "1x1"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
-
-  # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  top_module:  "tt_um_example"
-
-  # List your project's source files here.
-  # Source files must be in ./src and you must list each source file separately, one per line.
-  # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
-  source_files:
-    - "project.v"
-
-# The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
-# This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
-  # Inputs
-  ui[0]: ""
-  ui[1]: ""
-  ui[2]: ""
-  ui[3]: ""
-  ui[4]: ""
-  ui[5]: ""
-  ui[6]: ""
-  ui[7]: ""
+  ui_in[2:0]:  "logical block address"
+  ui_in[4:3]:  "command (00=read, 01=write_req, 10=write_commit, 11=move_ack)"
+  ui_in[5]:    "move_ack (asserted by host to confirm data move)"
+  uo_out[2:0]: "physical block address"
+  uo_out[3]:   "busy (active high during write‑commit sequence)"
+  uo_out[4]:   "move_request (asserted when data relocation is needed)"
+  uio_out[2:0]:"destination physical address during move"
+  uio_oe[2:0]: "output enable for uio_out (0b111 during move)"
 
-  # Outputs
-  uo[0]: ""
-  uo[1]: ""
-  uo[2]: ""
-  uo[3]: ""
-  uo[4]: ""
-  uo[5]: ""
-  uo[6]: ""
-  uo[7]: ""
-
-  # Bidirectional pins
-  uio[0]: ""
-  uio[1]: ""
-  uio[2]: ""
-  uio[3]: ""
-  uio[4]: ""
-  uio[5]: ""
-  uio[6]: ""
-  uio[7]: ""
-
-# Do not change!
-yaml_version: 6
+clocks:
+  - name: "clk"
+    freq: "10 MHz"   # easily meets timing
