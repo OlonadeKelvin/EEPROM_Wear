@@ -15,11 +15,9 @@ module tb;
         .clk(clk),
         .rst_n(rst_n)
     );
-
-    initial begin
+	initial begin
         $dumpfile("tb.vcd");
         $dumpvars(0, tb);
-        clk = 0;
-        forever #5 clk = ~clk;
+        // Removed the clk = 0 and forever loop from here
     end
 endmodule

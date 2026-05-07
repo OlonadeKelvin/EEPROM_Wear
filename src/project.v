@@ -100,6 +100,7 @@ module tt_um_wearlevel_controller (
     // --------------------------------------------------------
     reg [2:0] swap_logical;
     integer j;
+    integer i;
     always @* begin
         swap_logical = 3'd0;
         for (j = 0; j < 8; j = j+1)
@@ -124,7 +125,6 @@ module tt_um_wearlevel_controller (
             swap_logical_reg <= 0;
             remap_needed <= 1'b0;
             // initialise mapping and counters
-            integer i;
             for (i = 0; i < 8; i = i+1) begin
                 map[i] <= i[2:0];
                 wr_count[i] <= 0;
