@@ -16,11 +16,17 @@ module tb;
         $dumpvars(0, tb);
     end
 
+    // Drive power pins using wires for inout compatibility
+`ifdef GL_TEST
+    wire VPWR = 1'b1;
+    wire VGND = 1'b0;
+`endif
+
     // Instantiate the DUT with power pins attached for Gate-Level testing
     tt_um_wearlevel_controller dut (
     `ifdef GL_TEST
-        .VPWR(1'b1),
-        .VGND(1'b0),
+        .VPWR(VPWR),
+        .VGND(VGND),
     `endif
         .ui_in(ui_in),
         .uo_out(uo_out),
