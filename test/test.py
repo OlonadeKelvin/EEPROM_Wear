@@ -82,15 +82,18 @@ async def test_no_remap_under_threshold(dut):
         assert move_req == 0, f"move_request asserted early at cycle {i}"
 
     # 5th write – now threshold is exceeded
-    phys = await write_req(dut, 0)
-    await write_commit(dut)
+		phys = await write_req(dut, 0)
+		await write_commit(dut)
 
-    # At this point the FSM will be waiting for move_ack.
-    # busy must still be high and move_request high.
-    busy = (dut.uo_out.value.integer >> 3) & 1
-    move_req = (dut.uo_out.value.integer >> 4) & 1
-    assert busy == 1, "busy should be high during remap"
-    assert move_req == 1, "move_request not asserted after threshold exceeded"
+		# Wait for the FSM to navigate through the internal states to S_SWAP/S_WAIT_ACK
+		while ((dut.uo_out.value.integer >> 4) & 1) == 0:
+		    await RisingEdge(dut.clk)
+
+		# Now that it has reached the move request state, check the flags
+		busy = (dut.uo_out.value.integer >> 3) & 1
+		move_req = (dut.uo_out.value.integer >> 4) & 1
+		assert busy == 1, "busy should be high during remap"
+		assert move_req == 1, "move_request not asserted after threshold exceeded"
 
     # Complete the remap
     await move_ack(dut)
