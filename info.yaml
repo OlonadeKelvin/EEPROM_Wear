@@ -1,28 +1,26 @@
-# info.yaml for OpenLane / Tiny Tapeout
-
 project:
   title: "Hardware EEPROM Wear-Leveling Controller"
-  author: "Your Name"
+  author: "	Olonade Kelvin"
   description: >
     A fully digital wear‑leveling FSM for external EEPROM or flash memories.
     It implements dynamic wear‑levelling with configurable threshold and
     automatic logical‑to‑physical remapping. Ideal for edge‑device storage
     reliability enhancement.
-  documentation: "https://github.com/your-repo/wearlevel-controller"
+  documentation: "https://github.com/OlonadeKelvin/EEPROM_Wear"
   language: "verilog"
   top_module: "tt_um_wearlevel_controller"
   version: "1.0"
 
 pinout:
-  ui_in[2:0]:  "logical block address"
-  ui_in[4:3]:  "command (00=read, 01=write_req, 10=write_commit, 11=move_ack)"
-  ui_in[5]:    "move_ack (asserted by host to confirm data move)"
-  uo_out[2:0]: "physical block address"
-  uo_out[3]:   "busy (active high during write‑commit sequence)"
-  uo_out[4]:   "move_request (asserted when data relocation is needed)"
-  uio_out[2:0]:"destination physical address during move"
-  uio_oe[2:0]: "output enable for uio_out (0b111 during move)"
+  "ui_in[2:0]":   "logical block address"
+  "ui_in[4:3]":   "command (00=read, 01=write_req, 10=write_commit, 11=move_ack)"
+  "ui_in[5]":     "move_ack (asserted by host to confirm data move)"
+  "uo_out[2:0]":  "physical block address"
+  "uo_out[3]":    "busy (active high during write‑commit sequence)"
+  "uo_out[4]":    "move_request (asserted when data relocation is needed)"
+  "uio_out[2:0]": "destination physical address during move"
+  "uio_oe[2:0]":  "output enable for uio_out (0b111 during move)"
 
 clocks:
   - name: "clk"
-    freq: "10 MHz"   # easily meets timing
+    freq: "10 MHz"
