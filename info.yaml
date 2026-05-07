@@ -1,16 +1,18 @@
-yaml_version: 2
+---
+# info.yaml
+yaml_version: 6
 
 project:
   title: "Hardware EEPROM Wear-Leveling Controller"
   author: "Olonade Kelvin"
   description: >
-    A fully digital wear‑leveling FSM for external EEPROM or flash memories.
-    It implements dynamic wear‑levelling with configurable threshold and
-    automatic logical‑to‑physical remapping.
-  tiles: "1"                        # Single tile
+    A fully digital wear-leveling FSM for external EEPROM or flash memories.
+    It implements dynamic wear-leveling with configurable threshold and
+    automatic logical-to-physical remapping.
+  tiles: "1x1"                      # Changed to valid v6 dimension format
   source_files:
-    - src/project.v
-  clock_hz: "10000000"              # 10 MHz (passed as string)
+    - project.v                     # Ensure this path matches where your .v file is inside src/
+  clock_hz: 10000000                # Removed quotes so it is read as an integer
   top_module: tt_um_wearlevel_controller
   language: verilog
 
@@ -36,10 +38,10 @@ pinout:
   uo[7]: "Unused"
 
   # 8 bidirectional
-  uio[0]: "Destination physical address bit 0 (output during move)"
-  uio[1]: "Destination physical address bit 1 (output during move)"
-  uio[2]: "Destination physical address bit 2 (output during move)"
-  uio[3]: "Unused (output enable 0)"
+  uio[0]: "Destination physical addr bit 0"
+  uio[1]: "Destination physical addr bit 1"
+  uio[2]: "Destination physical addr bit 2"
+  uio[3]: "Unused"
   uio[4]: "Unused"
   uio[5]: "Unused"
   uio[6]: "Unused"
