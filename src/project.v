@@ -21,7 +21,7 @@
  */
 
 `default_nettype none
- 
+
 module tt_um_wearlevel_controller (
     input  wire [7:0] ui_in,
     output wire [7:0] uo_out,
@@ -32,7 +32,7 @@ module tt_um_wearlevel_controller (
     input  wire       clk,
     input  wire       rst_n
 );
- 
+
     // =========================================================
     // Parameters
     // =========================================================
@@ -41,7 +41,7 @@ module tt_um_wearlevel_controller (
     localparam PSI       = 8;           // Gap-advance period (writes)
     localparam CNT_WIDTH = 8;           // saturating wear counter width
     localparam TOT_WIDTH = 20;          // total-write counter width
- 
+
     // =========================================================
     // I/O decode
     // =========================================================
@@ -49,38 +49,38 @@ module tt_um_wearlevel_controller (
     wire [1:0]       cmd       = ui_in[4:3];
     wire             move_ack  = ui_in[5];
     wire [1:0]       telem_sel = ui_in[7:6];
- 
+
     wire cmd_read  = (cmd == 2'b00);
     wire cmd_write = (cmd == 2'b01);
     wire cmd_telem = (cmd == 2'b11);
- 
+
     // =========================================================
     // Persistent Start-Gap state
     // =========================================================
     reg [LOG2N-1:0] Start_r, Gap_r;
     reg [LOG2N-1:0] Start_shd, Gap_shd;   // power-fail-safe shadows
     reg [2:0]       GapCnt_r;
- 
+
     // =========================================================
     // Feistel LFSR — 10-bit, feedback taps [9]^[6]
     // KEY IS FROZEN at transaction start (not sampled mid-pipeline).
     // =========================================================
     reg [9:0] lfsr_r;
     reg [5:0] feistel_key;               // latched once per write transaction
- 
+
     wire [9:0] lfsr_next = {lfsr_r[8:0], lfsr_r[9] ^ lfsr_r[6]};
- 
+
     // =========================================================
     // Wear counters (8-bit saturating) + retired flags
     // =========================================================
     reg [CNT_WIDTH-1:0] cnt [0:N-1];
     reg                 retired [0:N-1];
- 
+
     // =========================================================
     // Total-write counter
     // =========================================================
     reg [TOT_WIDTH-1:0] total_wr;
- 
+
     // =========================================================
     // Hamming(6,3) ECC per 3-bit field
     //   codeword: [p1, p2, d0, p3, d1, d2]
@@ -97,7 +97,7 @@ module tt_um_wearlevel_controller (
             ham_enc3[5] = d[2];
         end
     endfunction
- 
+
     // Returns {err_flag, corrected_d[2:0]}
     function automatic [3:0] ham_dec3;
         input [5:0] c;
@@ -124,9 +124,9 @@ module tt_um_wearlevel_controller (
             end
         end
     endfunction
- 
+
     reg [5:0] ecc_start_r, ecc_gap_r;
- 
+
     // =========================================================
     // 2-round 3-bit Feistel scrambler
     // =========================================================
@@ -151,7 +151,7 @@ module tt_um_wearlevel_controller (
             feistel_fn = {L[1:0], R};
         end
     endfunction
- 
+
     // =========================================================
     // Start-Gap address mapping (pure combinational function)
     // =========================================================
@@ -168,14 +168,14 @@ module tt_um_wearlevel_controller (
             startgap_fn = p;
         end
     endfunction
- 
+
     // =========================================================
     // Combinational read path — zero FSM cycles for reads
     // Uses feistel_key (frozen for last write; stable during idle)
     // =========================================================
     wire [LOG2N-1:0] read_scr  = feistel_fn(logical, feistel_key);
     wire [LOG2N-1:0] read_phys = startgap_fn(read_scr, Start_r, Gap_r);
- 
+
     // =========================================================
     // Telemetry: combinational max-min skew
     // =========================================================
@@ -192,7 +192,7 @@ module tt_um_wearlevel_controller (
         end
     end
     wire [CNT_WIDTH-1:0] skew_w = tmax_r - tmin_r;
- 
+
     // =========================================================
     // FSM encoding
     // =========================================================
@@ -204,363 +204,361 @@ module tt_um_wearlevel_controller (
                ST_RETIRE   = 3'd5,
                ST_WAIT_ACK = 3'd6,
                ST_TELEM    = 3'd7;
- 
+
     reg [2:0] state;
- 
+
     // Pipeline latches
     reg [LOG2N-1:0] log_lat, scr_lat, phys_lat;
- 
+
     // Output registers
     reg busy_r, move_req_r, ecc_err_r, blk_ret_r, telem_vld_r;
     reg [7:0] uio_data_r;
     reg       uio_oe_r;
-    
+
     // Additional registers
-	reg saturated_lat;
+    reg saturated_lat;
+
+    // =========================================================
+    // Combinational busy: asserts immediately when a write cmd is
+    // seen in ST_IDLE so the test can observe it on the very next
+    // sample after driving the command.
+    // =========================================================
+    wire busy_out = busy_r | (cmd_write & (state == ST_IDLE));
 
-	// =========================================================
-	// FSM — sequential
-	// =========================================================
-	integer k;
-	always @(posedge clk or negedge rst_n) begin
-		if (!rst_n) begin
-		    state         <= ST_IDLE;
+    // =========================================================
+    // FSM — sequential
+    // =========================================================
+    integer k;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state         <= ST_IDLE;
 
-		    Start_r       <= 3'd0;
-		    Gap_r         <= 3'd0;
-		    Start_shd     <= 3'd0;
-		    Gap_shd       <= 3'd0;
-		    GapCnt_r      <= 3'd0;
+            Start_r       <= 3'd0;
+            Gap_r         <= 3'd0;
+            Start_shd     <= 3'd0;
+            Gap_shd       <= 3'd0;
+            GapCnt_r      <= 3'd0;
 
-		    lfsr_r        <= 10'h3FF;
-		    feistel_key   <= 6'h3F;
+            lfsr_r        <= 10'h3FF;
+            feistel_key   <= 6'h3F;
 
-		    total_wr      <= {TOT_WIDTH{1'b0}};
+            total_wr      <= {TOT_WIDTH{1'b0}};
 
-		    busy_r        <= 1'b0;
-		    move_req_r    <= 1'b0;
-		    ecc_err_r     <= 1'b0;
-		    blk_ret_r     <= 1'b0;
-		    telem_vld_r   <= 1'b0;
+            busy_r        <= 1'b0;
+            move_req_r    <= 1'b0;
+            ecc_err_r     <= 1'b0;
+            blk_ret_r     <= 1'b0;
+            telem_vld_r   <= 1'b0;
 
-		    uio_data_r    <= 8'd0;
-		    uio_oe_r      <= 1'b0;
+            uio_data_r    <= 8'd0;
+            uio_oe_r      <= 1'b0;
 
-		    phys_lat      <= 3'd0;
-		    log_lat       <= 3'd0;
-		    scr_lat       <= 3'd0;
+            phys_lat      <= 3'd0;
+            log_lat       <= 3'd0;
+            scr_lat       <= 3'd0;
 
-		    saturated_lat <= 1'b0;
+            saturated_lat <= 1'b0;
 
-		    ecc_start_r   <= ham_enc3(3'd0);
-		    ecc_gap_r     <= ham_enc3(3'd0);
+            ecc_start_r   <= ham_enc3(3'd0);
+            ecc_gap_r     <= ham_enc3(3'd0);
 
-		    for (k = 0; k < N; k = k + 1) begin
-		        cnt[k]     <= {CNT_WIDTH{1'b0}};
-		        retired[k] <= 1'b0;
-		    end
+            for (k = 0; k < N; k = k + 1) begin
+                cnt[k]     <= {CNT_WIDTH{1'b0}};
+                retired[k] <= 1'b0;
+            end
 
-		end else begin
+        end else begin
 
-		    // Continuous LFSR evolution
-		    lfsr_r <= lfsr_next;
+            // Continuous LFSR evolution
+            lfsr_r <= lfsr_next;
 
-		    case (state)
+            case (state)
 
-		    // =====================================================
-		    // IDLE
-		    // =====================================================
-		    ST_IDLE: begin
+            // =====================================================
+            // IDLE
+            // =====================================================
+            ST_IDLE: begin
 
-		        // Clear single-cycle telemetry pulse
-		        telem_vld_r <= 1'b0;
+                // Clear single-cycle telemetry pulse
+                telem_vld_r <= 1'b0;
 
-		        // If not in move_req state, release uio
-		        if (!move_req_r)
-		            uio_oe_r <= 1'b0;
+                // If not in move_req state, release uio
+                if (!move_req_r)
+                    uio_oe_r <= 1'b0;
 
+                // -------------------------------------------------
+                // TELEMETRY REQUEST
+                // -------------------------------------------------
+                if (cmd_telem) begin
 
+                    case (telem_sel)
+                        2'b00: uio_data_r <= skew_w;
+                        2'b01: uio_data_r <= total_wr[7:0];
+                        2'b10: uio_data_r <= total_wr[15:8];
+                        2'b11: uio_data_r <= total_wr[TOT_WIDTH-1:16];
+                    endcase
 
-		        // -------------------------------------------------
-		        // TELEMETRY REQUEST
-		        // -------------------------------------------------
-		        if (cmd_telem) begin
+                    // telem_vld_r raised here; stays high through ST_TELEM,
+                    // cleared at the exit of ST_TELEM.
+                    telem_vld_r <= 1'b1;
+                    uio_oe_r    <= 1'b1;
 
-		            case (telem_sel)
+                    state <= ST_TELEM;
+                end
 
-		                2'b00:
-		                    uio_data_r <= skew_w;
+                // -------------------------------------------------
+                // WRITE REQUEST (move_ack is ignored here — it is
+                // only meaningful in ST_WAIT_ACK)
+                // -------------------------------------------------
+                else if (cmd_write) begin
 
-		                2'b01:
-		                    uio_data_r <= total_wr[7:0];
+                    feistel_key <= lfsr_r[5:0];
 
-		                2'b10:
-		                    uio_data_r <= total_wr[15:8];
+                    log_lat <= logical;
 
-		                2'b11:
-		                    uio_data_r <= total_wr[TOT_WIDTH-1:16];
+                    // busy_r registered here; combinational busy_out
+                    // already covers the current cycle via busy_out wire.
+                    busy_r <= 1'b1;
 
-		            endcase
+                    state <= ST_FEISTEL;
+                end
 
-		            telem_vld_r <= 1'b1;
-		            uio_oe_r    <= 1'b1;
+                // READS ARE PURELY COMBINATIONAL
 
-		            state <= ST_TELEM;
-		        end
+            end
 
-		        // -------------------------------------------------
-		        // WRITE REQUEST
-		        // -------------------------------------------------
-		        else if (cmd_write) begin
+            // =====================================================
+            // FEISTEL
+            // =====================================================
+            ST_FEISTEL: begin
 
-		            feistel_key <= lfsr_r[5:0];
+                scr_lat <= feistel_fn(log_lat, feistel_key);
 
-		            log_lat <= logical;
+                state <= ST_MAP;
 
-		            busy_r <= 1'b1;
+            end
 
-		            state <= ST_FEISTEL;
-		        end
+            // =====================================================
+            // MAP
+            // =====================================================
+            ST_MAP: begin : ecc_blk
 
-		        // READS ARE PURELY COMBINATIONAL
+                reg [3:0] ds, dg;
 
-		    end
+                ds = ham_dec3(ecc_start_r);
+                dg = ham_dec3(ecc_gap_r);
 
-		    // =====================================================
-		    // FEISTEL
-		    // =====================================================
-		    ST_FEISTEL: begin
+                ecc_err_r <= ds[3] | dg[3];
 
-		        scr_lat <= feistel_fn(log_lat, feistel_key);
+                phys_lat <= startgap_fn(
+                    scr_lat,
+                    ds[2:0],
+                    dg[2:0]
+                );
 
-		        state <= ST_MAP;
+                blk_ret_r <= retired[
+                    startgap_fn(scr_lat, ds[2:0], dg[2:0])
+                ];
 
-		    end
+                state <= ST_INC;
 
-		    // =====================================================
-		    // MAP
-		    // =====================================================
-		    ST_MAP: begin : ecc_blk
+            end
 
-		        reg [3:0] ds, dg;
+            // =====================================================
+            // INC
+            // =====================================================
+            ST_INC: begin
 
-		        ds = ham_dec3(ecc_start_r);
-		        dg = ham_dec3(ecc_gap_r);
+                saturated_lat <= 1'b0;
 
-		        ecc_err_r <= ds[3] | dg[3];
+                if (cnt[phys_lat] != {CNT_WIDTH{1'b1}}) begin
+                    cnt[phys_lat] <= cnt[phys_lat] + 1'b1;
 
+                    // Saturates on this increment OR already at max
+                    if (cnt[phys_lat] == ({CNT_WIDTH{1'b1}} - 1'b1))
+                        saturated_lat <= 1'b1;
 
-		        phys_lat <= startgap_fn(
-		            scr_lat,
-		            ds[2:0],
-		            dg[2:0]
-		        );
+                end else begin
+                    // Already at max — still saturated
+                    saturated_lat <= 1'b1;
+                end
 
-		        blk_ret_r <= retired[
-		            startgap_fn(scr_lat, ds[2:0], dg[2:0])
-		        ];
+                total_wr <= total_wr + 1'b1;
 
-		        state <= ST_INC;
+                state <= ST_ADVANCE;
 
-		    end
+            end
 
-		    // =====================================================
-		    // INC
-		    // =====================================================
-		    ST_INC: begin
+            // =====================================================
+            // ADVANCE
+            // =====================================================
+            ST_ADVANCE: begin : adv_blk
 
-		        saturated_lat <= 1'b0;
+                reg [LOG2N-1:0] gap_next;
+                reg [LOG2N-1:0] start_next;
 
-		        if (cnt[phys_lat] != {CNT_WIDTH{1'b1}}) begin
+                gap_next   = Gap_r;
+                start_next = Start_r;
 
-		            cnt[phys_lat] <= cnt[phys_lat] + 1'b1;
+                if (GapCnt_r == (PSI - 1)) begin
 
-		            // Detect impending saturation
-		            if (cnt[phys_lat] == {CNT_WIDTH{1'b1}} - 1'b1)
-		                saturated_lat <= 1'b1;
+                    GapCnt_r <= 3'd0;
 
-		        end else begin
+                    gap_next = (Gap_r + 1'b1) % N;
 
-		            saturated_lat <= 1'b1;
+                    if (gap_next == Start_r)
+                        start_next = (Start_r + 1'b1) % N;
 
-		        end
+                end else begin
 
-		        total_wr <= total_wr + 1'b1;
+                    GapCnt_r <= GapCnt_r + 1'b1;
 
-		        state <= ST_ADVANCE;
+                end
 
-		    end
+                Start_r <= start_next;
+                Gap_r   <= gap_next;
 
-		    // =====================================================
-		    // ADVANCE
-		    // =====================================================
-			ST_ADVANCE: begin
+                ecc_start_r <= ham_enc3(start_next);
+                ecc_gap_r   <= ham_enc3(gap_next);
 
-				reg [LOG2N-1:0] gap_next;
-				reg [LOG2N-1:0] start_next;
+                Start_shd <= start_next;
+                Gap_shd   <= gap_next;
 
-				gap_next   = Gap_r;
-				start_next = Start_r;
+                state <= ST_RETIRE;
 
-				if (GapCnt_r == (PSI - 1)) begin
+            end
 
-					GapCnt_r <= 3'd0;
+            // =====================================================
+            // RETIRE
+            // =====================================================
+            ST_RETIRE: begin
 
-					gap_next = (Gap_r + 1'b1) % N;
+                if (saturated_lat) begin
 
-					if (gap_next == Start_r)
-						start_next = (Start_r + 1'b1) % N;
+                    retired[phys_lat] <= 1'b1;
 
-				end else begin
+                    move_req_r <= 1'b1;
 
-					GapCnt_r <= GapCnt_r + 1'b1;
+                    uio_data_r <= {
+                        {(8-LOG2N){1'b0}},
+                        phys_lat
+                    };
 
-				end
+                    uio_oe_r <= 1'b1;
 
-				Start_r <= start_next;
-				Gap_r   <= gap_next;
+                    // Hold busy until ACK
+                    busy_r <= 1'b1;
 
-				ecc_start_r <= ham_enc3(start_next);
-				ecc_gap_r   <= ham_enc3(gap_next);
+                    state <= ST_WAIT_ACK;
 
-				Start_shd <= start_next;
-				Gap_shd   <= gap_next;
+                end else begin
 
-				state <= ST_RETIRE;
+                    busy_r <= 1'b0;
 
-			end
+                    state <= ST_IDLE;
 
-		    // =====================================================
-		    // RETIRE
-		    // =====================================================
-		    ST_RETIRE: begin
+                end
 
-		        if (saturated_lat) begin
+            end
 
-		            retired[phys_lat] <= 1'b1;
+            // =====================================================
+            // WAIT_ACK
+            // =====================================================
+            ST_WAIT_ACK: begin
 
-		            move_req_r <= 1'b1;
+                busy_r     <= 1'b1;
+                move_req_r <= 1'b1;
+                uio_oe_r   <= 1'b1;
 
-		            uio_data_r <= {
-		                {(8-LOG2N){1'b0}},
-		                phys_lat
-		            };
+                if (move_ack) begin
 
-		            uio_oe_r <= 1'b1;
+                    move_req_r <= 1'b0;
+                    uio_oe_r   <= 1'b0;
+                    busy_r     <= 1'b0;
 
-		            // Hold busy until ACK
-		            busy_r <= 1'b1;
+                    state <= ST_IDLE;
 
-		            state <= ST_WAIT_ACK;
+                end
 
-		        end else begin
+            end
 
-		            busy_r <= 1'b0;
+            // =====================================================
+            // TELEM
+            // =====================================================
+            ST_TELEM: begin
 
-		            state <= ST_IDLE;
+                // telem_vld_r stays 1 while in this state (was set in
+                // ST_IDLE). Clear it now so it is 0 after we leave.
+                telem_vld_r <= 1'b0;
 
-		        end
+                uio_oe_r <= 1'b0;
 
-		    end
+                state <= ST_IDLE;
 
-		    // =====================================================
-		    // WAIT_ACK
-		    // =====================================================
-		    ST_WAIT_ACK: begin
+            end
 
-		        busy_r     <= 1'b1;
-		        move_req_r <= 1'b1;
-		        uio_oe_r   <= 1'b1;
+            // =====================================================
+            // DEFAULT
+            // =====================================================
+            default: begin
 
-		        if (move_ack) begin
+                state <= ST_IDLE;
 
-		            move_req_r <= 1'b0;
-		            uio_oe_r   <= 1'b0;
-		            busy_r     <= 1'b0;
+            end
 
-		            state <= ST_IDLE;
+            endcase
+        end
+    end
 
-		        end
-
-		    end
-
-		    // =====================================================
-		    // TELEM
-		    // =====================================================
-		    ST_TELEM: begin
-
-		        // Hold valid exactly one visible cycle
-		        telem_vld_r <= 1'b0;
-
-		        uio_oe_r <= 1'b0;
-
-		        state <= ST_IDLE;
-
-		    end
-
-		    // =====================================================
-		    // DEFAULT
-		    // =====================================================
-		    default: begin
-
-		        state <= ST_IDLE;
-
-		    end
-
-		    endcase
-		end
-	end
- 
     // =========================================================
     // Output assignment
-    // FIX 4: READ is purely combinational — phys_comb drives output
-    //         when cmd_read; phys_lat used for write results.
+    // READ is purely combinational — phys_comb drives output
+    // when cmd_read; phys_lat used for write results.
+    // busy_out provides combinational early-assertion for writes.
     // =========================================================
     wire [LOG2N-1:0] phys_out = cmd_read ? read_phys : phys_lat;
- 
+
     assign uo_out[2:0] = phys_out;
-    assign uo_out[3] = (cmd_read) ? 1'b0 : busy_r;
+    assign uo_out[3]   = cmd_read ? 1'b0 : busy_out;
     assign uo_out[4]   = move_req_r;
     assign uo_out[5]   = ecc_err_r;
     assign uo_out[6]   = blk_ret_r;
     assign uo_out[7]   = telem_vld_r;
- 
+
     assign uio_out = uio_data_r;
     assign uio_oe  = {8{uio_oe_r}};
- 
+
     // =========================================================
     // Formal properties (compile with `define FORMAL)
     // =========================================================
 `ifdef FORMAL
     reg [TOT_WIDTH-1:0] f_prev;
     always @(posedge clk) f_prev <= total_wr;
- 
+
     // 1. Monotonicity
     always @(posedge clk)
         if (rst_n) assert(total_wr >= f_prev);
- 
+
     // 2. Bounded skew (Start-Gap theorem: max-min <= PSI+1)
     always @(posedge clk)
         if (rst_n) assert(skew_w <= PSI + 1);
- 
+
     // 3. GapCnt in valid range
     always @(posedge clk)
         if (rst_n) assert(GapCnt_r < PSI);
- 
+
     // 4. Start/Gap always in [0, N-1]
     always @(posedge clk)
         if (rst_n) begin
             assert(Start_r < N);
             assert(Gap_r   < N);
         end
- 
+
     // 5. Liveness: busy always eventually clears
     cover property (
         @(posedge clk) disable iff (!rst_n)
         $rose(busy_r) ##[1:32] $fell(busy_r)
     );
 `endif
- 
-endmodule
- 
 
+endmodule
