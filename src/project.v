@@ -219,11 +219,6 @@ module tt_um_wearlevel_controller (
 	reg saturated_lat;
 	reg [LOG2N-1:0] next_gap;
 
- 
-	// Additional registers
-	reg saturated_lat;
-	reg [LOG2N-1:0] next_gap;
-
 	// =========================================================
 	// FSM — sequential
 	// =========================================================
