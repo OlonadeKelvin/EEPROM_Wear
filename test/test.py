@@ -3,388 +3,362 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles, Timer
  
-# Constants matching the RTL
-N         = 8
-PSI       = 8
-CNT_MAX   = 0xFF          # 8-bit saturating counter ceiling
-# Cycles from commit until busy de-asserts (no retirement path):
-#   IDLE(latch) → FEISTEL → MAP → INC → ADVANCE → RETIRE → IDLE
-# That is 6 rising edges observed from the first clock after commit.
-WRITE_CYCLES = 7          # conservative upper bound; we always poll
+# ─── Design constants ───────────────────────────────────────────────────────
+N        = 8
+PSI      = 8
+CNT_MAX  = 0xFF
+TOT_WIDTH = 20
  
-CMD_READ   = 0b00
-CMD_WRITE  = 0b01
-CMD_COMMIT = 0b10
-CMD_TELEM  = 0b11
+CMD_READ  = 0b00
+CMD_WRITE = 0b01
+CMD_TELEM = 0b11
  
-TELEM_SKEW     = 0b00
-TELEM_TOTAL_LO = 0b01
-TELEM_TOTAL_HI = 0b10
-TELEM_TOTAL_TOP= 0b11
+TSEL_SKEW     = 0b00
+TSEL_TOTAL_LO = 0b01
+TSEL_TOTAL_HI = 0b10
+TSEL_TOTAL_TOP= 0b11
  
-# Low-level helpers
+# ─── Bit-field extractors ───────────────────────────────────────────────────
  
 def _ui(cmd, addr=0, move_ack=0, telem_sel=0):
-    """Build an 8-bit ui_in value."""
-    return (telem_sel << 6) | (move_ack << 5) | (cmd << 3) | (addr & 0x7)
+    return (telem_sel & 0x3) << 6 | (move_ack & 1) << 5 | (cmd & 0x3) << 3 | (addr & 0x7)
  
+def _phys(dut):        return int(dut.uo_out.value) & 0x7
+def _busy(dut):        return (int(dut.uo_out.value) >> 3) & 1
+def _move_req(dut):    return (int(dut.uo_out.value) >> 4) & 1
+def _ecc_err(dut):     return (int(dut.uo_out.value) >> 5) & 1
+def _blk_ret(dut):     return (int(dut.uo_out.value) >> 6) & 1
+def _telem_vld(dut):   return (int(dut.uo_out.value) >> 7) & 1
+def _uio(dut):         return int(dut.uio_out.value) & 0xFF
  
-def _phys(dut):
-    return int(dut.uo_out.value) & 0x7
- 
-def _busy(dut):
-    return (int(dut.uo_out.value) >> 3) & 1
- 
-def _move_req(dut):
-    return (int(dut.uo_out.value) >> 4) & 1
- 
-def _ecc_err(dut):
-    return (int(dut.uo_out.value) >> 5) & 1
- 
-def _blk_retired(dut):
-    return (int(dut.uo_out.value) >> 6) & 1
- 
-def _telem_valid(dut):
-    return (int(dut.uo_out.value) >> 7) & 1
- 
-def _uio(dut):
-    return int(dut.uio_out.value) & 0xFF
- 
+# ─── Core helpers ───────────────────────────────────────────────────────────
  
 async def reset_dut(dut):
-    """Full reset sequence."""
-    dut.rst_n.value    = 0
-    dut.ui_in.value    = 0
-    dut.uio_in.value   = 0
-    dut.ena.value      = 1
-    await Timer(50, units="ns")
+    """Hard reset; leaves clock running."""
+    dut.rst_n.value  = 0
+    dut.ui_in.value  = 0
+    dut.uio_in.value = 0
+    dut.ena.value    = 1
+    await Timer(40, units="ns")
     await RisingEdge(dut.clk)
-    dut.rst_n.value    = 1
-    await ClockCycles(dut.clk, 2)  # settle
+    dut.rst_n.value  = 1
+    await ClockCycles(dut.clk, 3)   # allow internals to settle
  
  
 async def wait_idle(dut, timeout=64):
-    """Wait until busy de-asserts; fail if it takes longer than timeout cycles."""
+    """Poll until busy de-asserts. Raises if timed out."""
     for _ in range(timeout):
         if not _busy(dut):
             return
         await RisingEdge(dut.clk)
-    raise AssertionError("DUT stuck busy after {:d} cycles".format(timeout))
+    raise AssertionError(f"DUT stuck busy for >{timeout} cycles")
  
  
 async def do_read(dut, addr):
     """
-    Issue read_req and wait for phys_lat to be valid.
-    A read takes IDLE→FEISTEL→MAP→IDLE = 3 clocks after the cmd is sampled.
-    Returns the physical address.
+    Combinational read — no FSM cycles required.
+    Drive cmd=00 and sample phys on the SAME rising edge.
+    Returns physical address. busy must be 0 before and after.
     """
+    assert _busy(dut) == 0, "do_read called while DUT is busy"
     dut.ui_in.value = _ui(CMD_READ, addr)
-    await RisingEdge(dut.clk)          # IDLE samples cmd, moves to ST_FEISTEL
-    await RisingEdge(dut.clk)          # ST_FEISTEL → ST_MAP
-    await RisingEdge(dut.clk)          # ST_MAP → ST_IDLE, phys_lat written
-    # phys_lat is registered; valid from this point
-    dut.ui_in.value = 0                # release bus
-    return _phys(dut)
- 
- 
-async def do_write_req(dut, addr):
-    """
-    Issue write_req (latch address into the controller).
-    Returns the physical address seen at that moment (before commit pipeline).
-    """
-    dut.ui_in.value = _ui(CMD_WRITE, addr)
     await RisingEdge(dut.clk)
-    await RisingEdge(dut.clk)          # let controller sample + move to FEISTEL
-    await RisingEdge(dut.clk)          # FEISTEL → MAP
-    await RisingEdge(dut.clk)          # MAP → ST_INC (write_pend=1)
+    # phys_out = read_phys (combinational mux; valid this cycle)
+    phys = _phys(dut)
     dut.ui_in.value = 0
-    # The controller is now in ST_INC (busy). Drive commit to continue.
+    assert _busy(dut) == 0, "busy asserted after a read"
+    return phys
  
  
-async def do_commit(dut):
+async def do_write(dut, addr):
     """
-    Drive write_commit and let the pipeline drain.
-    After reset write_pend is set by do_write_req above; the commit drives
-    the remainder of the pipeline.
-    Handles the move_req / retirement handshake automatically.
-    Returns True if a block-retirement occurred.
+    Full write transaction:
+      1. Assert cmd=01 for one clock (FSM latches in ST_IDLE).
+      2. Release bus.
+      3. Wait for pipeline to drain; handle retirement if needed.
+    Returns (phys, retired_flag).
     """
-    # The RTL samples cmd_commit in ST_IDLE, but in the new design the write
-    # pipeline starts immediately on write_req (no separate commit needed to
-    # trigger INC — commit is only used to decide whether to run the pipeline).
-    # Actually: looking at the RTL, cmd_commit is NOT used — the pipeline
-    # starts as soon as cmd_write is seen.  The original bronze commit cmd
-    # has been replaced by the automatic pipeline.  We therefore just wait
-    # for busy to fall.
+    assert _busy(dut) == 0, "do_write called while DUT is busy"
+    dut.ui_in.value = _ui(CMD_WRITE, addr)
+    await RisingEdge(dut.clk)   # ST_IDLE samples → ST_FEISTEL; busy asserts
     dut.ui_in.value = 0
+ 
     retired = False
-    for _ in range(32):
+    for _ in range(64):
         if _move_req(dut):
-            # A block hit counter saturation — send move_ack
-            dut.ui_in.value = _ui(CMD_COMMIT, move_ack=1)
+            # A block just saturated — acknowledge the migration
+            dut.ui_in.value = _ui(CMD_WRITE, 0, move_ack=1)
             await RisingEdge(dut.clk)
             dut.ui_in.value = 0
             retired = True
+            # busy clears on the same edge; break after one more check
+            await RisingEdge(dut.clk)
+            break
         if not _busy(dut):
             break
         await RisingEdge(dut.clk)
-    return retired
  
- 
-async def full_write(dut, addr):
-    """
-    Perform a complete write to logical address addr:
-      write_req → pipeline drains → handle retirement if needed.
-    Returns (phys, retired).
-    """
-    dut.ui_in.value = _ui(CMD_WRITE, addr)
-    await RisingEdge(dut.clk)          # IDLE: latch cmd, → ST_FEISTEL
-    dut.ui_in.value = 0
-    # Pipeline runs autonomously; just wait for completion / handle retirement
-    retired = await do_commit(dut)
     phys = _phys(dut)
     return phys, retired
  
  
-async def read_telem(dut, sel):
+async def do_telem(dut, sel):
     """
-    Request a telemetry byte and return it.
-    telem_valid pulses for one cycle after the telem cmd.
+    Telemetry request.
+    Timing (all rising edges):
+      edge 0: cmd=11 sampled in ST_IDLE → telem_valid asserts, → ST_TELEM
+      edge 1: ST_TELEM state — telem_valid=1, data on uio_out  ← we sample here
+      edge 2: ST_TELEM → ST_IDLE, telem_valid clears
+    Returns (telem_valid, uio_byte) sampled at edge 1.
     """
+    assert _busy(dut) == 0, "do_telem called while DUT is busy"
     dut.ui_in.value = _ui(CMD_TELEM, telem_sel=sel)
-    await RisingEdge(dut.clk)          # ST_IDLE processes telem, → ST_TELEM
-    # telem_valid is set at end of that clock; check on next rising edge
-    await RisingEdge(dut.clk)
-    valid = _telem_valid(dut)
-    data  = _uio(dut)
+    await RisingEdge(dut.clk)   # edge 0: cmd sampled, → ST_TELEM
     dut.ui_in.value = 0
-    await RisingEdge(dut.clk)          # ST_TELEM → ST_IDLE (valid clears)
+    # edge 1: we are now in ST_TELEM; telem_valid registered high
+    await RisingEdge(dut.clk)
+    valid = _telem_vld(dut)
+    data  = _uio(dut)
+    # edge 2: ST_TELEM → ST_IDLE clears valid
+    await RisingEdge(dut.clk)
     return valid, data
  
- 
-# ─────────────────────────────────────────────────────────────────────────────
-# Tests
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Tests ──────────────────────────────────────────────────────────────────
  
 @cocotb.test()
 async def test_reset_defaults(dut):
-    """
-    After reset:
-      - busy, move_req, ecc_err, blk_retired, telem_valid all clear
-      - Start=0, Gap=0 ⟹ startgap(scr, 0, 0) = (scr+1)%N for all logical
-        (all addresses ≥ Gap=0, so formula: (scr+0+1)%N)
-        With Feistel key from LFSR seed 0x3FF we can't predict scr, but we
-        CAN assert that phys is always in [0, N-1] and that two reads of the
-        same logical return the same result (mapping is deterministic once the
-        LFSR has advanced the same number of cycles).
-    """
+    """After reset all status flags clear; phys output in valid range."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
-    # Flags all clear after reset
-    assert _busy(dut)      == 0, "busy should be 0 after reset"
-    assert _move_req(dut)  == 0, "move_req should be 0 after reset"
-    assert _ecc_err(dut)   == 0, "ecc_err should be 0 after reset"
-    assert _telem_valid(dut) == 0, "telem_valid should be 0 after reset"
+    assert _busy(dut)      == 0, "busy not clear after reset"
+    assert _move_req(dut)  == 0, "move_req not clear after reset"
+    assert _ecc_err(dut)   == 0, "ecc_err not clear after reset"
+    assert _telem_vld(dut) == 0, "telem_vld not clear after reset"
  
-    # Physical addresses always in valid range
     for addr in range(N):
         p = await do_read(dut, addr)
-        assert 0 <= p < N, (
-            f"Physical address {p} out of range for logical {addr}"
-        )
+        assert 0 <= p < N, f"phys {p} out of range for logical {addr}"
  
  
 @cocotb.test()
-async def test_read_does_not_set_busy(dut):
-    """A read request must not leave busy asserted on return."""
+async def test_read_never_asserts_busy(dut):
+    """Reads are combinational — busy must stay 0 for all logical addresses."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
     for addr in range(N):
         await do_read(dut, addr)
-        assert _busy(dut) == 0, f"busy still set after read of logical {addr}"
+        assert _busy(dut) == 0, f"busy set after read of logical {addr}"
  
  
 @cocotb.test()
-async def test_write_increments_total(dut):
+async def test_read_phys_in_range(dut):
+    """Every logical address maps to a physical address in [0, N-1]."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+ 
+    for addr in range(N):
+        p = await do_read(dut, addr)
+        assert 0 <= p < N, f"logical {addr} → phys {p} out of range"
+ 
+ 
+@cocotb.test()
+async def test_write_busy_asserts_and_clears(dut):
     """
-    Each write increments the total_wr counter, readable via telemetry.
-    We do 3 writes then check total_lo == 3.
+    One clock after a write cmd, busy must be 1.
+    After the pipeline drains, busy must be 0.
     """
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
-    for i in range(3):
-        await full_write(dut, i % N)
+    dut.ui_in.value = _ui(CMD_WRITE, 0)
+    await RisingEdge(dut.clk)   # ST_IDLE → ST_FEISTEL; busy latched 1
+    dut.ui_in.value = 0
+    assert _busy(dut) == 1, "busy not asserted one cycle into write pipeline"
  
-    valid, lo = await read_telem(dut, TELEM_TOTAL_LO)
-    assert valid == 1, "telem_valid not asserted"
-    assert lo == 3,    f"Expected total_wr=3, got {lo}"
+    await wait_idle(dut)
+    assert _busy(dut) == 0, "busy still set after pipeline complete"
  
  
 @cocotb.test()
-async def test_write_pipeline_no_retirement(dut):
+async def test_write_phys_in_range(dut):
+    """phys output must always be in [0, N-1] for every write."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+ 
+    for i in range(N * 2):
+        p, _ = await do_write(dut, i % N)
+        assert 0 <= p < N, f"write {i}: phys {p} out of range"
+ 
+ 
+@cocotb.test()
+async def test_write_increments_total(dut):
+    """3 writes → total_wr_lo == 3 (verified via telemetry)."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+ 
+    for i in range(3):
+        await do_write(dut, i % N)
+ 
+    valid, lo = await do_telem(dut, TSEL_TOTAL_LO)
+    assert valid == 1, "telem_valid not asserted"
+    assert lo == 3,    f"Expected total_wr_lo=3, got {lo}"
+ 
+ 
+@cocotb.test()
+async def test_no_retirement_under_saturation(dut):
     """
-    PSI-1 (=7) writes to the same logical block must complete without
-    triggering a block retirement (counter reaches 7, not 255).
-    busy must clear after each write; move_req must never assert.
+    PSI-1 writes to the same logical block must complete without any
+    retirement (wear counters do not reach 0xFF in 7 writes).
     """
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
     for i in range(PSI - 1):
-        _, retired = await full_write(dut, 0)
-        assert not retired,     f"Unexpected retirement on write {i}"
-        assert _busy(dut) == 0, f"busy stuck after write {i}"
-        assert _move_req(dut) == 0, f"move_req unexpectedly set after write {i}"
+        _, retired = await do_write(dut, 0)
+        assert not retired,      f"Unexpected retirement on write {i}"
+        assert _move_req(dut) == 0, f"move_req set on write {i}"
+        assert _busy(dut)     == 0, f"busy stuck after write {i}"
  
  
 @cocotb.test()
-async def test_gap_advances_after_psi_writes(dut):
+async def test_gap_advances_causing_rotation(dut):
     """
-    After PSI (=8) writes the Gap register increments.
-    We verify this indirectly: the physical address returned for logical 0
-    must differ from the one returned at reset (Start-Gap rotates).
-    
-    NOTE: Because Feistel uses the LFSR (which advances every clock cycle),
-    the same logical address can map to different physicals across reads.
-    We verify behavioural correctness: after enough writes, the controller
-    is still alive (busy clears, no hang).
+    After PSI*2 writes to the same logical address, the Start-Gap rotation
+    must have targeted more than one physical block.
     """
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
-    physicals_seen = set()
+    seen = set()
     for i in range(PSI * 2):
-        p, _ = await full_write(dut, 0)
-        physicals_seen.add(p)
+        p, _ = await do_write(dut, 0)
+        seen.add(p)
         assert _busy(dut) == 0, f"busy stuck after write {i}"
  
-    # After 2 full rotation periods, more than one physical must have been
-    # targeted (wear leveling is working)
-    assert len(physicals_seen) > 1, (
-        f"Start-Gap never rotated physical address; only saw {physicals_seen}"
+    assert len(seen) > 1, (
+        f"Start-Gap never rotated: always mapped to {seen}"
     )
  
  
 @cocotb.test()
 async def test_no_ecc_error_clean_run(dut):
-    """ECC error flag must stay clear during normal operation."""
+    """ECC error flag stays clear during normal operation."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
     for i in range(16):
-        await full_write(dut, i % N)
+        await do_write(dut, i % N)
         assert _ecc_err(dut) == 0, f"Spurious ECC error on write {i}"
  
  
 @cocotb.test()
-async def test_physical_always_in_range(dut):
-    """Physical address output must always be in [0, N-1] across many writes."""
+async def test_telem_valid_is_one_cycle_pulse(dut):
+    """
+    telem_valid must be 1 exactly on the ST_TELEM cycle,
+    then 0 when back in ST_IDLE.
+    """
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
-    for i in range(32):
-        p, _ = await full_write(dut, i % N)
-        assert 0 <= p < N, f"phys={p} out of range on write {i}"
+    # Edge 0: send telem cmd
+    dut.ui_in.value = _ui(CMD_TELEM, telem_sel=TSEL_SKEW)
+    await RisingEdge(dut.clk)   # ST_IDLE → ST_TELEM; telem_vld registered 1
+    dut.ui_in.value = 0
+ 
+    # Edge 1: in ST_TELEM — valid must be 1
+    await RisingEdge(dut.clk)
+    assert _telem_vld(dut) == 1, "telem_vld not asserted in ST_TELEM"
+ 
+    # Edge 2: back in ST_IDLE — valid must have cleared
+    await RisingEdge(dut.clk)
+    assert _telem_vld(dut) == 0, "telem_vld did not clear after ST_TELEM"
  
  
 @cocotb.test()
-async def test_telemetry_skew_bounded(dut):
+async def test_telem_skew_bounded(dut):
     """
-    After PSI*N writes distributed evenly across all logical blocks,
-    the reported skew must satisfy the Start-Gap theoretical bound: ≤ PSI+1.
+    After PSI*N evenly distributed writes, reported skew ≤ PSI+1
+    (Start-Gap theoretical bound).
     """
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
-    writes = PSI * N
-    for i in range(writes):
-        await full_write(dut, i % N)
+    for i in range(PSI * N):
+        await do_write(dut, i % N)
  
-    valid, skew = await read_telem(dut, TELEM_SKEW)
+    valid, skew = await do_telem(dut, TSEL_SKEW)
     assert valid == 1, "telem_valid not asserted"
     assert skew <= PSI + 1, (
-        f"Wear skew {skew} exceeds theoretical bound {PSI + 1}"
+        f"Wear skew {skew} exceeds Start-Gap bound of {PSI + 1}"
     )
  
  
 @cocotb.test()
-async def test_telemetry_total_write_counter(dut):
+async def test_telem_total_write_16bit(dut):
     """
-    total_wr counter: write WRITES_COUNT times, then read back lo+hi bytes
-    and verify the reconstructed 16-bit value equals WRITES_COUNT.
+    Perform WRITES_COUNT writes; reconstruct 16-bit total_wr from
+    lo + hi telemetry bytes and verify it matches.
     """
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
-    WRITES_COUNT = 20
+    WRITES_COUNT = 25
     for i in range(WRITES_COUNT):
-        await full_write(dut, i % N)
+        await do_write(dut, i % N)
  
-    valid_lo, lo = await read_telem(dut, TELEM_TOTAL_LO)
-    valid_hi, hi = await read_telem(dut, TELEM_TOTAL_HI)
+    valid_lo, lo = await do_telem(dut, TSEL_TOTAL_LO)
+    valid_hi, hi = await do_telem(dut, TSEL_TOTAL_HI)
  
-    assert valid_lo == 1 and valid_hi == 1, "telem_valid not asserted"
+    assert valid_lo and valid_hi, "telem_valid not asserted"
     total = (hi << 8) | lo
     assert total == WRITES_COUNT, (
-        f"Expected total_wr={WRITES_COUNT}, reconstructed {total}"
+        f"Expected total_wr={WRITES_COUNT}, got {total}"
     )
  
  
 @cocotb.test()
-async def test_telem_valid_pulses_one_cycle(dut):
+async def test_retirement_on_saturation(dut):
     """
-    telem_valid must be a single-cycle pulse; it must be 0 two clocks after
-    the telem command.
-    """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
-    await reset_dut(dut)
- 
-    dut.ui_in.value = _ui(CMD_TELEM, telem_sel=TELEM_SKEW)
-    await RisingEdge(dut.clk)   # IDLE → ST_TELEM
-    await RisingEdge(dut.clk)   # ST_TELEM: telem_valid should be 1
-    assert _telem_valid(dut) == 1, "telem_valid not asserted in ST_TELEM"
-    dut.ui_in.value = 0
-    await RisingEdge(dut.clk)   # ST_TELEM → IDLE: telem_valid should clear
-    assert _telem_valid(dut) == 0, "telem_valid did not clear after ST_TELEM"
- 
- 
-@cocotb.test()
-async def test_retirement_on_counter_saturation(dut):
-    """
-    Drive a single block's counter to saturation (255 writes to the block
-    that logical 0 maps to). The controller must:
-      1. Assert move_req
-      2. De-assert after move_ack
-      3. Mark the block as retired (blk_retired flag on subsequent reads)
-    
-    Since PSI=8 and Gap rotates every 8 writes, logical 0 will rotate away
-    from its initial physical. We deliberately write to ALL logical addresses
-    to exhaust one physical block.
-    
-    Strategy: perform 255 writes to logical 0 while watching for move_req.
-    The Feistel scrambler means we can't know exactly which physical gets
-    hit, but eventually one saturates.
+    Flood one logical address with writes until a block saturates (cnt=0xFF).
+    Verify:
+      • move_req asserts
+      • move_req de-asserts after move_ack
+      • busy clears
     """
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
     retirement_seen = False
-    for i in range(CNT_MAX + 8):    # a few extra to be sure
+ 
+    # CNT_MAX+16 gives enough margin for any Gap rotation
+    for i in range(CNT_MAX + 16):
+        assert _busy(dut) == 0, f"Iteration {i}: busy before write"
+ 
+        # Issue write
         dut.ui_in.value = _ui(CMD_WRITE, 0)
-        await RisingEdge(dut.clk)   # IDLE → FEISTEL
+        await RisingEdge(dut.clk)
         dut.ui_in.value = 0
  
-        # Drain pipeline; handle move_req
-        for _ in range(32):
+        # Drain pipeline; watch for move_req
+        for _ in range(64):
             if _move_req(dut):
+                # Verify busy is still high during ACK wait
+                assert _busy(dut) == 1, "busy not high during move_req"
                 retirement_seen = True
-                # Acknowledge the migration request
-                dut.ui_in.value = _ui(CMD_COMMIT, move_ack=1)
+ 
+                # Send move_ack
+                dut.ui_in.value = _ui(CMD_WRITE, 0, move_ack=1)
                 await RisingEdge(dut.clk)
                 dut.ui_in.value = 0
+ 
+                # Verify handshake cleared
+                await RisingEdge(dut.clk)
+                assert _move_req(dut) == 0, "move_req still set after ack"
+                assert _busy(dut)     == 0, "busy still set after ack"
+                break
+ 
             if not _busy(dut):
                 break
             await RisingEdge(dut.clk)
@@ -393,155 +367,104 @@ async def test_retirement_on_counter_saturation(dut):
             break
  
     assert retirement_seen, (
-        "move_req never asserted after filling a wear counter to saturation"
+        "move_req never asserted after flooding writes to saturation"
     )
-    assert _move_req(dut) == 0, "move_req still set after move_ack"
-    assert _busy(dut)     == 0, "busy still set after retirement handshake"
  
  
 @cocotb.test()
-async def test_read_while_idle(dut):
-    """
-    A read issued while the controller is idle (not busy) must always
-    return a valid physical address in [0, N-1] and must not trigger busy.
-    """
+async def test_move_req_held_until_ack(dut):
+    """move_req must stay asserted every cycle until move_ack is received."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
-    for addr in range(N):
-        p = await do_read(dut, addr)
-        assert 0 <= p < N, f"Read logical {addr} returned invalid phys {p}"
-        assert _busy(dut) == 0, "busy set after read"
- 
- 
-@cocotb.test()
-async def test_busy_during_write_pipeline(dut):
-    """
-    busy must be asserted from the cycle after write_req until the pipeline
-    completes.  We sample it mid-pipeline (after ST_FEISTEL) and verify.
-    """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
-    await reset_dut(dut)
- 
-    dut.ui_in.value = _ui(CMD_WRITE, 3)
-    await RisingEdge(dut.clk)      # IDLE → ST_FEISTEL  (busy set here)
-    dut.ui_in.value = 0
-    # One clock into the pipeline busy must be high
-    assert _busy(dut) == 1, "busy not set one cycle into write pipeline"
- 
-    # Wait for completion
-    await wait_idle(dut)
-    assert _busy(dut) == 0, "busy still set after pipeline completion"
- 
- 
-@cocotb.test()
-async def test_interleaved_reads_and_writes(dut):
-    """
-    Interleave reads on different logical blocks between writes.
-    All reads must return valid physical addresses; all writes must complete.
-    No hangs or corruption.
-    """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
-    await reset_dut(dut)
- 
-    for i in range(16):
-        # Write to even-indexed blocks
-        await full_write(dut, (i * 2) % N)
-        # Read odd-indexed block immediately after
-        p = await do_read(dut, (i * 2 + 1) % N)
-        assert 0 <= p < N, f"Read returned out-of-range phys {p} on iteration {i}"
-        assert _busy(dut) == 0, f"busy stuck after read on iteration {i}"
- 
- 
-@cocotb.test()
-async def test_all_logical_blocks_writable(dut):
-    """Every logical block address (0–7) can be written without error."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
-    await reset_dut(dut)
- 
-    for addr in range(N):
-        p, retired = await full_write(dut, addr)
-        assert 0 <= p < N, f"Write to logical {addr} returned invalid phys {p}"
-        assert _busy(dut) == 0, f"busy stuck after write to logical {addr}"
- 
- 
-@cocotb.test()
-async def test_move_req_de_asserts_after_ack(dut):
-    """
-    Saturate a block and verify the full retirement handshake:
-      move_req asserts → ack sent → move_req de-asserts → busy clears.
-    """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
-    await reset_dut(dut)
- 
-    # Drive enough writes to one logical to saturate its physical
+    # Flood to saturation
     for i in range(CNT_MAX + 16):
         dut.ui_in.value = _ui(CMD_WRITE, 0)
         await RisingEdge(dut.clk)
         dut.ui_in.value = 0
  
-        acked = False
-        for _ in range(32):
-            if _move_req(dut) and not acked:
-                dut.ui_in.value = _ui(CMD_COMMIT, move_ack=1)
+        reached_wait = False
+        for _ in range(64):
+            if _move_req(dut):
+                reached_wait = True
+                # Hold off ack for 5 cycles; move_req must stay 1
+                for hold in range(5):
+                    assert _move_req(dut) == 1, (
+                        f"move_req dropped without ack (hold cycle {hold})"
+                    )
+                    await RisingEdge(dut.clk)
+                # Now ack
+                dut.ui_in.value = _ui(CMD_WRITE, 0, move_ack=1)
                 await RisingEdge(dut.clk)
                 dut.ui_in.value = 0
-                acked = True
-                # Verify de-assertion
                 await RisingEdge(dut.clk)
-                assert _move_req(dut) == 0, "move_req did not de-assert after ack"
-                assert _busy(dut)     == 0, "busy did not clear after ack"
+                assert _move_req(dut) == 0, "move_req not cleared after ack"
                 break
-            if not _busy(dut) and not _move_req(dut):
+            if not _busy(dut):
                 break
             await RisingEdge(dut.clk)
  
-        if acked:
-            break   # retirement verified — test passes
+        if reached_wait:
+            break
  
  
 @cocotb.test()
-async def test_stress_random_addresses(dut):
+async def test_all_logical_addresses_writable(dut):
+    """Every logical block (0–7) can be written without hang or error."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+ 
+    for addr in range(N):
+        p, _ = await do_write(dut, addr)
+        assert 0 <= p < N, f"logical {addr} → phys {p} out of range"
+        assert _busy(dut) == 0, f"busy stuck after write to logical {addr}"
+ 
+ 
+@cocotb.test()
+async def test_interleaved_reads_and_writes(dut):
     """
-    200-transaction pseudo-random workload.
-    Verifies: no hangs, physical always in [0,N-1], total_wr matches.
-    Uses a simple LCG for repeatability without importing random.
+    Interleave reads between writes.
+    Reads must never assert busy; writes must always complete cleanly.
     """
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
  
-    # LCG parameters (Knuth)
+    for i in range(16):
+        await do_write(dut, (i * 2) % N)
+        p = await do_read(dut, (i * 2 + 1) % N)
+        assert 0 <= p < N, f"Read returned out-of-range phys {p} (iter {i})"
+        assert _busy(dut) == 0, f"busy after read (iter {i})"
+ 
+ 
+@cocotb.test()
+async def test_stress_random_200(dut):
+    """
+    200-transaction pseudo-random write workload.
+    Verifies: no hangs, phys always in range, total_wr counter correct.
+    Uses a deterministic LCG for reproducibility.
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+ 
+    # Knuth multiplicative LCG
     lcg = 0xACE1
-    expected_total = 0
+    expected = 0
  
     for i in range(200):
         lcg = (lcg * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFF
         addr = lcg % N
  
-        dut.ui_in.value = _ui(CMD_WRITE, addr)
-        await RisingEdge(dut.clk)
-        dut.ui_in.value = 0
-        expected_total += 1
+        p, _ = await do_write(dut, addr)
+        expected += 1
  
-        # Drain with retirement handling
-        for _ in range(48):
-            if _move_req(dut):
-                dut.ui_in.value = _ui(CMD_COMMIT, move_ack=1)
-                await RisingEdge(dut.clk)
-                dut.ui_in.value = 0
-            if not _busy(dut):
-                break
-            await RisingEdge(dut.clk)
+        assert 0 <= p < N, f"[{i}] phys {p} out of range"
+        assert _busy(dut) == 0, f"[{i}] busy stuck after write"
  
-        p = _phys(dut)
-        assert 0 <= p < N, f"[iter {i}] phys {p} out of range"
- 
-    # Verify total_wr counter (only lower 16 bits checked)
-    valid_lo, lo = await read_telem(dut, TELEM_TOTAL_LO)
-    valid_hi, hi = await read_telem(dut, TELEM_TOTAL_HI)
-    assert valid_lo and valid_hi
+    # Cross-check total_wr lower 16 bits
+    _, lo = await do_telem(dut, TSEL_TOTAL_LO)
+    _, hi = await do_telem(dut, TSEL_TOTAL_HI)
     total = (hi << 8) | lo
-    assert total == (expected_total & 0xFFFF), (
-        f"total_wr mismatch: expected {expected_total & 0xFFFF}, got {total}"
+    assert total == (expected & 0xFFFF), (
+        f"total_wr mismatch: expected {expected & 0xFFFF:#x}, got {total:#x}"
     )
 
