@@ -6,7 +6,7 @@ project:
   title: "Hardware EEPROM Wear-Leveling Controller"
   author: "Olonade Kelvin"
   description: >
-	Implements the proven Start-Gap wear-leveling algorithm, the same technique used in commercial 3D-XPoint and phase-change memories, enhanced with a 2-round Feistel address scrambler for strong resistance against wear-leveling attacks. Additional features include Hamming(6,3) single-error correction on persistent state, automatic bad-block retirement, saturating wear counters, and an in-band telemetry port for monitoring.	
+Implements the proven Start-Gap wear-leveling algorithm, the same technique used in commercial 3D-XPoint and phase-change memories, enhanced with a 2-round Feistel address scrambler for strong resistance against wear-leveling attacks. Additional features include Hamming(6,3) single-error correction on persistent state, automatic bad-block retirement, saturating wear counters, and an in-band telemetry port for monitoring.	
   tiles: "1x1"                      # Changed to valid v6 dimension format
   source_files:
     - project.v                     # Ensure this path matches where your .v file is inside src/
