@@ -6,9 +6,7 @@ project:
   title: "Hardware EEPROM Wear-Leveling Controller"
   author: "Olonade Kelvin"
   description: >
-    A fully digital wear-leveling FSM for external EEPROM or flash memories.
-    It implements dynamic wear-leveling with configurable threshold and
-    automatic logical-to-physical remapping.
+	Implements the proven Start-Gap wear-leveling algorithm, the same technique used in commercial 3D-XPoint and phase-change memories, enhanced with a 2-round Feistel address scrambler for strong resistance against wear-leveling attacks. Additional features include Hamming(6,3) single-error correction on persistent state, automatic bad-block retirement, saturating wear counters, and an in-band telemetry port for monitoring.	
   tiles: "1x1"                      # Changed to valid v6 dimension format
   source_files:
     - project.v                     # Ensure this path matches where your .v file is inside src/
@@ -16,33 +14,34 @@ project:
   top_module: tt_um_wearlevel_controller
   language: verilog
 
-pinout:
-  # 8 inputs
-  ui[0]: "Logical address bit 0"
-  ui[1]: "Logical address bit 1"
-  ui[2]: "Logical address bit 2"
-  ui[3]: "Command bit 0"
-  ui[4]: "Command bit 1"
-  ui[5]: "move_ack (host acknowledges data move)"
-  ui[6]: "Unused"
-  ui[7]: "Unused"
+ pinout:
+ # Inputs
+ ui[0]: "logical block address bit 0"
+ ui[1]: "logical block address bit 1"
+ ui[2]: "logical block address bit 2"
+ ui[3]: "command bit 0  (cmd[0])"
+ ui[4]: "command bit 1  (cmd[1])   00=read 01=write 10=commit 11=telem"
+ ui[5]: "move_ack — external agent confirms data-copy complete"
+ ui[6]: "telemetry select bit 0"
+ ui[7]: "telemetry select bit 1   00=skew 01=total_lo 10=total_hi"
 
-  # 8 outputs
-  uo[0]: "Physical address bit 0"
-  uo[1]: "Physical address bit 1"
-  uo[2]: "Physical address bit 2"
-  uo[3]: "Busy flag"
-  uo[4]: "move_request"
-  uo[5]: "Unused"
-  uo[6]: "Unused"
-  uo[7]: "Unused"
+ # Outputs
+ uo[0]: "physical block address bit 0"
+ uo[1]: "physical block address bit 1"
+ uo[2]: "physical block address bit 2"
+ uo[3]: "busy — controller is processing"
+ uo[4]: "move_req — request external agent to migrate block"
+ uo[5]: "ecc_error — single-bit ECC correction occurred (informational)"
+ uo[6]: "block_retired — currently addressed physical block is retired"
+ uo[7]: "telem_valid — telemetry byte on uio_out is valid"
+ 
+ # Bidirectional (used as output here)
+ uio[0]: "move_dest / telem_data bit 0"
+ uio[1]: "move_dest / telem_data bit 1"
+ uio[2]: "move_dest / telem_data bit 2"
+ uio[3]: "telem_data bit 3"
+ uio[4]: "telem_data bit 4"
+ uio[5]: "telem_data bit 5"
+ uio[6]: "telem_data bit 6"
+ uio[7]: "telem_data bit 7"
 
-  # 8 bidirectional
-  uio[0]: "Destination physical addr bit 0"
-  uio[1]: "Destination physical addr bit 1"
-  uio[2]: "Destination physical addr bit 2"
-  uio[3]: "Unused"
-  uio[4]: "Unused"
-  uio[5]: "Unused"
-  uio[6]: "Unused"
-  uio[7]: "Unused"
