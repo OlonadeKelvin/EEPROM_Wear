@@ -217,7 +217,6 @@ module tt_um_wearlevel_controller (
     
     // Additional registers
 	reg saturated_lat;
-	reg [LOG2N-1:0] next_gap;
 
 	// =========================================================
 	// FSM — sequential
@@ -280,8 +279,7 @@ module tt_um_wearlevel_controller (
 		        if (!move_req_r)
 		            uio_oe_r <= 1'b0;
 
-		        // Ensure busy stays low in idle
-		        busy_r <= 1'b0;
+
 
 		        // -------------------------------------------------
 		        // TELEMETRY REQUEST
@@ -351,8 +349,6 @@ module tt_um_wearlevel_controller (
 
 		        ecc_err_r <= ds[3] | dg[3];
 
-		        Start_r <= ds[2:0];
-		        Gap_r   <= dg[2:0];
 
 		        phys_lat <= startgap_fn(
 		            scr_lat,
@@ -398,35 +394,41 @@ module tt_um_wearlevel_controller (
 		    // =====================================================
 		    // ADVANCE
 		    // =====================================================
-		    ST_ADVANCE: begin
+			ST_ADVANCE: begin
 
-		        if (GapCnt_r == (PSI - 1)) begin
+				reg [LOG2N-1:0] gap_next;
+				reg [LOG2N-1:0] start_next;
 
-		            next_gap = (Gap_r + 1'b1) % N;
+				gap_next   = Gap_r;
+				start_next = Start_r;
 
-		            GapCnt_r <= 3'd0;
+				if (GapCnt_r == (PSI - 1)) begin
 
-		            Gap_r <= next_gap;
+					GapCnt_r <= 3'd0;
 
-		            if (next_gap == Start_r)
-		                Start_r <= (Start_r + 1'b1) % N;
+					gap_next = (Gap_r + 1'b1) % N;
 
-		        end else begin
+					if (gap_next == Start_r)
+						start_next = (Start_r + 1'b1) % N;
 
-		            GapCnt_r <= GapCnt_r + 1'b1;
+				end else begin
 
-		        end
+					GapCnt_r <= GapCnt_r + 1'b1;
 
-		        // ECC shadow commit
-		        ecc_start_r <= ham_enc3(Start_r);
-		        ecc_gap_r   <= ham_enc3(Gap_r);
+				end
 
-		        Start_shd <= Start_r;
-		        Gap_shd   <= Gap_r;
+				Start_r <= start_next;
+				Gap_r   <= gap_next;
 
-		        state <= ST_RETIRE;
+				ecc_start_r <= ham_enc3(start_next);
+				ecc_gap_r   <= ham_enc3(gap_next);
 
-		    end
+				Start_shd <= start_next;
+				Gap_shd   <= gap_next;
+
+				state <= ST_RETIRE;
+
+			end
 
 		    // =====================================================
 		    // RETIRE
@@ -488,9 +490,9 @@ module tt_um_wearlevel_controller (
 		    ST_TELEM: begin
 
 		        // Hold valid exactly one visible cycle
-		        telem_vld_r <= 1'b1;
+		        telem_vld_r <= 1'b0;
 
-		        uio_oe_r <= 1'b1;
+		        uio_oe_r <= 1'b0;
 
 		        state <= ST_IDLE;
 
@@ -517,7 +519,7 @@ module tt_um_wearlevel_controller (
     wire [LOG2N-1:0] phys_out = cmd_read ? read_phys : phys_lat;
  
     assign uo_out[2:0] = phys_out;
-    assign uo_out[3]   = busy_r;
+    assign uo_out[3] = (cmd_read) ? 1'b0 : busy_r;
     assign uo_out[4]   = move_req_r;
     assign uo_out[5]   = ecc_err_r;
     assign uo_out[6]   = blk_ret_r;
