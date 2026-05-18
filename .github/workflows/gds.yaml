@@ -17,6 +17,8 @@ jobs:
         uses: TinyTapeout/tt-gds-action@ttsky26a
         with:
           pdk: sky130A
+        env:
+          TT_ARGS: "--density 0.5 --hold_margin 0.0"
 
   precheck:
     needs: gds
