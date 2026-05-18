@@ -41,7 +41,8 @@ module tt_um_wearlevel_controller (
     localparam PSI       = 8;           // Gap-advance period (writes)
     localparam CNT_WIDTH = 8;           // saturating wear counter width
     localparam TOT_WIDTH = 20;          // total-write counter width
-
+    localparam N_MASK = 3'b111;   		// 7
+    localparam PSI_MINUS_1 = 3'd7;   	// because PSI=8
     
     // I/O decode
     
@@ -166,9 +167,9 @@ module tt_um_wearlevel_controller (
         reg [LOG2N-1:0] p;
         begin
             if (scr < g)
-                p = (scr + s) & (N-1);
+                p = (scr + s) & N_MASK;
             else
-                p = (scr + s + 1) & (N-1);
+                p = (scr + s + 1) & N_MASK;
             startgap_fn = p;
         end
     endfunction
@@ -365,6 +366,7 @@ module tt_um_wearlevel_controller (
                 // on every PSI writes so a physical-indexed counter
                 // would be diluted across N blocks and could never
                 // saturate within CNT_MAX writes to one logical addr.
+                $display("[%0t] ST_INC: log_lat=%0d, total_wr=%0d", $time, log_lat, total_wr + 1);
                 if (cnt[log_lat] == {CNT_WIDTH{1'b1}}) begin
                     saturated_lat <= 1'b1;      // already at max
                 end else begin
@@ -373,7 +375,7 @@ module tt_um_wearlevel_controller (
                                       ({CNT_WIDTH{1'b1}} - 1'b1));
                 end
 
-                total_wr <= total_wr + 1'b1;
+                total_wr <= total_wr + 20'd1;
 
                 state <= ST_ADVANCE;
 
@@ -390,11 +392,11 @@ module tt_um_wearlevel_controller (
                 gap_next   = Gap_r;
                 start_next = Start_r;
 
-                if (GapCnt_r == (PSI - 1)) begin
+                if (GapCnt_r == (PSI_MINUS_1)) begin
                     GapCnt_r   <= 3'd0;
-                    gap_next    = (Gap_r + 1'b1) & (N-1);
+                    gap_next    = (Gap_r + 1'b1) & N_MASK;
                     if (gap_next == Start_r)
-                        start_next = (Start_r + 1'b1) & (N-1);
+                        start_next = (Start_r + 1'b1) & N_MASK;
                 end else begin
                     GapCnt_r <= GapCnt_r + 1'b1;
                 end
