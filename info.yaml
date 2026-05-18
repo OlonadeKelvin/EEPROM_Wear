@@ -43,3 +43,7 @@ pinout:
   uio[5]: "telem_data bit 5"
   uio[6]: "telem_data bit 6"
   uio[7]: "telem_data bit 7"
+
+pnr:
+  density: 0.3
+  hold_margin: -1.0
