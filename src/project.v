@@ -166,9 +166,9 @@ module tt_um_wearlevel_controller (
         reg [LOG2N-1:0] p;
         begin
             if (scr < g)
-                p = (scr + s) % N;
+                p = (scr + s) & (N-1);
             else
-                p = (scr + s + 1) % N;
+                p = (scr + s + 1) & (N-1);
             startgap_fn = p;
         end
     endfunction
@@ -392,9 +392,9 @@ module tt_um_wearlevel_controller (
 
                 if (GapCnt_r == (PSI - 1)) begin
                     GapCnt_r   <= 3'd0;
-                    gap_next    = (Gap_r + 1'b1) % N;
+                    gap_next    = (Gap_r + 1'b1) & (N-1);
                     if (gap_next == Start_r)
-                        start_next = (Start_r + 1'b1) % N;
+                        start_next = (Start_r + 1'b1) & (N-1);
                 end else begin
                     GapCnt_r <= GapCnt_r + 1'b1;
                 end
