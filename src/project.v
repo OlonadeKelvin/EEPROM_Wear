@@ -33,6 +33,11 @@ module tt_um_wearlevel_controller (
     input  wire       rst_n
 );
 
+    // verilator lint_off UNUSEDSIGNAL
+    // The signals uio_in and ena are required by the Tiny Tapeout template,
+    // but they are not used in this design.
+    // verilator lint_on UNUSEDSIGNAL
+
     // Parameters
     localparam N         = 8;
     localparam LOG2N     = 3;
@@ -55,7 +60,6 @@ module tt_um_wearlevel_controller (
 
     // Persistent Start-Gap state
     reg [LOG2N-1:0] Start_r, Gap_r;
-    reg [LOG2N-1:0] Start_shd, Gap_shd;
     reg [2:0]       GapCnt_r;
 
     // Feistel LFSR — 10-bit, feedback taps [9]^[6]
@@ -70,47 +74,6 @@ module tt_um_wearlevel_controller (
 
     // Total-write counter
     reg [TOT_WIDTH-1:0] total_wr;
-
-    // Hamming(6,3) ECC per 3-bit field
-    function automatic [5:0] ham_enc3;
-        input [2:0] d;
-        begin
-            ham_enc3[0] = d[0] ^ d[1];
-            ham_enc3[1] = d[0] ^ d[2];
-            ham_enc3[2] = d[0];
-            ham_enc3[3] = d[1] ^ d[2];
-            ham_enc3[4] = d[1];
-            ham_enc3[5] = d[2];
-        end
-    endfunction
-
-    function automatic [3:0] ham_dec3;
-        input [5:0] c;
-        reg [2:0] s;
-        reg [5:0] cc;
-        begin
-            s[0] = c[0] ^ c[2] ^ c[4];
-            s[1] = c[1] ^ c[2] ^ c[5];
-            s[2] = c[3] ^ c[4] ^ c[5];
-            cc = c;
-            if (s != 3'b000) begin
-                case (s)
-                    3'd1: cc[0] = ~c[0];
-                    3'd2: cc[1] = ~c[1];
-                    3'd3: cc[2] = ~c[2];
-                    3'd4: cc[3] = ~c[3];
-                    3'd5: cc[4] = ~c[4];
-                    3'd6: cc[5] = ~c[5];
-                    default: cc = c;
-                endcase
-                ham_dec3 = {1'b1, cc[5], cc[4], cc[2]};
-            end else begin
-                ham_dec3 = {1'b0, c[5], c[4], c[2]};
-            end
-        end
-    endfunction
-
-    reg [5:0] ecc_start_r, ecc_gap_r;
 
     // 2-round 3-bit Feistel scrambler
     function automatic [2:0] feistel_fn;
@@ -200,8 +163,6 @@ module tt_um_wearlevel_controller (
 
             Start_r       <= 3'd0;
             Gap_r         <= 3'd0;
-            Start_shd     <= 3'd0;
-            Gap_shd       <= 3'd0;
             GapCnt_r      <= 3'd0;
 
             lfsr_r        <= 10'h3FF;
@@ -223,9 +184,6 @@ module tt_um_wearlevel_controller (
             scr_lat       <= {LOG2N{1'b0}};
 
             saturated_lat <= 1'b0;
-
-            ecc_start_r   <= ham_enc3(3'd0);
-            ecc_gap_r     <= ham_enc3(3'd0);
 
             for (k = 0; k < N; k = k + 1) begin
                 cnt[k]     <= {CNT_WIDTH{1'b0}};
@@ -274,19 +232,12 @@ module tt_um_wearlevel_controller (
                 state   <= ST_MAP;
             end
 
-            // MAP
-            ST_MAP: begin : ecc_blk
-                reg [3:0] ds, dg;
-                ds = ham_dec3(ecc_start_r);
-                dg = ham_dec3(ecc_gap_r);
-
-                ecc_err_r <= ds[3] | dg[3];
-
-                phys_lat <= startgap_fn(scr_lat, ds[2:0], dg[2:0]);
-
-                blk_ret_r <= retired[startgap_fn(scr_lat, ds[2:0], dg[2:0])];
-
-                state <= ST_INC;
+            // MAP (ECC removed: use Start_r, Gap_r directly)
+            ST_MAP: begin
+                ecc_err_r <= 1'b0;                     // no ECC error
+                phys_lat  <= startgap_fn(scr_lat, Start_r, Gap_r);
+                blk_ret_r <= retired[startgap_fn(scr_lat, Start_r, Gap_r)];
+                state     <= ST_INC;
             end
 
             // INC — increment wear counter (LOGICAL index)
@@ -320,10 +271,6 @@ module tt_um_wearlevel_controller (
 
                 Start_r     <= start_next;
                 Gap_r       <= gap_next;
-                ecc_start_r <= ham_enc3(start_next);
-                ecc_gap_r   <= ham_enc3(gap_next);
-                Start_shd   <= start_next;
-                Gap_shd     <= gap_next;
 
                 state <= ST_RETIRE;
             end
@@ -375,7 +322,7 @@ module tt_um_wearlevel_controller (
     assign uo_out[2:0] = phys_out;
     assign uo_out[3]   = busy_comb;                     // removed cmd_read mask
     assign uo_out[4]   = move_req_r;
-    assign uo_out[5]   = ecc_err_r;
+    assign uo_out[5]   = ecc_err_r;                     // always 0 now
     assign uo_out[6]   = blk_ret_r;
     assign uo_out[7]   = telem_valid_r;                 // registered one‑cycle pulse
 
