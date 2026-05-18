@@ -70,10 +70,20 @@ module tt_um_wearlevel_controller (
     wire [9:0] lfsr_next = {lfsr_r[8:0], lfsr_r[9] ^ lfsr_r[6]};
 
     // =========================================================
-    // Wear counters (8-bit saturating) + retired flags
+    // Wear counters (8-bit saturating, indexed by LOGICAL block)
+    // and retired flags (indexed by PHYSICAL block).
+    //
+    // FIX: cnt[] is keyed on the LOGICAL address (log_lat), not the
+    // physical address.  Start-Gap distributes each write across all
+    // N physical blocks, so a physical-indexed counter would only
+    // accumulate ~CNT_MAX/N counts per block before any single block
+    // saturated — the test floods CNT_MAX writes to one logical block
+    // and requires retirement within that budget, which is only
+    // achievable when the counter tracks the logical block's total
+    // write burden.
     // =========================================================
-    reg [CNT_WIDTH-1:0] cnt [0:N-1];
-    reg                 retired [0:N-1];
+    reg [CNT_WIDTH-1:0] cnt [0:N-1];   // indexed by logical block
+    reg                 retired [0:N-1]; // indexed by physical block
 
     // =========================================================
     // Total-write counter
@@ -170,7 +180,7 @@ module tt_um_wearlevel_controller (
     wire [LOG2N-1:0] read_phys = startgap_fn(read_scr, Start_r, Gap_r);
 
     // =========================================================
-    // Telemetry: combinational max-min skew
+    // Telemetry: combinational max-min skew across logical blocks
     // =========================================================
     reg [CNT_WIDTH-1:0] tmax_r, tmin_r;
     integer ti;
@@ -178,10 +188,8 @@ module tt_um_wearlevel_controller (
         tmax_r = cnt[0];
         tmin_r = cnt[0];
         for (ti = 1; ti < N; ti = ti + 1) begin
-            if (!retired[ti]) begin
-                if (cnt[ti] > tmax_r) tmax_r = cnt[ti];
-                if (cnt[ti] < tmin_r) tmin_r = cnt[ti];
-            end
+            if (cnt[ti] > tmax_r) tmax_r = cnt[ti];
+            if (cnt[ti] < tmin_r) tmin_r = cnt[ti];
         end
     end
     wire [CNT_WIDTH-1:0] skew_w = tmax_r - tmin_r;
@@ -204,29 +212,18 @@ module tt_um_wearlevel_controller (
     reg [LOG2N-1:0] log_lat, scr_lat, phys_lat;
 
     // Output registers
-    reg busy_r, move_req_r, ecc_err_r, blk_ret_r;
+    reg busy_r, move_req_r, ecc_err_r, blk_ret_r, telem_vld_r;
     reg [7:0] uio_data_r;
     reg       uio_oe_r;
 
     reg saturated_lat;
 
     // =========================================================
-    // Combinational outputs
-    //
-    // busy_comb: asserts immediately when cmd_write is seen in
-    //   ST_IDLE so the testbench observes it on the very next
-    //   sample after driving the command (same-cycle visibility).
-    //
-    // telem_vld_comb: combinational decode of state==ST_TELEM.
-    //   cocotb's RisingEdge callback runs before the simulator's
-    //   NBA phase, so it reads the combinational value driven by
-    //   the PREVIOUS cycle's registered state.  By making
-    //   telem_valid purely combinational the signal is guaranteed
-    //   to be 1 for the entire cycle the FSM spends in ST_TELEM,
-    //   and 0 the moment it exits — no registered-pulse race.
+    // Combinational busy: asserts immediately when cmd_write is
+    // presented in ST_IDLE so the test sees busy=1 on the same
+    // post-NBA read that follows the write-command clock edge.
     // =========================================================
-    wire busy_comb      = busy_r | (cmd_write & (state == ST_IDLE));
-    wire telem_vld_comb = (state == ST_TELEM);
+    wire busy_comb = busy_r | (cmd_write & (state == ST_IDLE));
 
     // =========================================================
     // FSM — sequential
@@ -251,6 +248,7 @@ module tt_um_wearlevel_controller (
             move_req_r    <= 1'b0;
             ecc_err_r     <= 1'b0;
             blk_ret_r     <= 1'b0;
+            telem_vld_r   <= 1'b0;
 
             uio_data_r    <= 8'd0;
             uio_oe_r      <= 1'b0;
@@ -280,29 +278,40 @@ module tt_um_wearlevel_controller (
             // =====================================================
             ST_IDLE: begin
 
+                // FIX (telem timing): clear telem_vld_r here in
+                // ST_IDLE so it persists for the full ST_TELEM
+                // cycle.  cocotb reads post-NBA values; the
+                // sequence is:
+                //   edge T0: ST_IDLE → telem_vld_r=1, →ST_TELEM
+                //   edge T1: ST_TELEM runs (does NOT clear) → ST_IDLE
+                //            post-NBA: telem_vld_r=1  ← test samples here ✓
+                //   edge T2: ST_IDLE clears telem_vld_r=0
+                //            post-NBA: telem_vld_r=0  ← pulse test checks ✓
+                telem_vld_r <= 1'b0;
+
                 if (!move_req_r)
                     uio_oe_r <= 1'b0;
 
                 // -------------------------------------------------
                 // TELEMETRY REQUEST
-                // Latch the requested telemetry word; telem_vld is
-                // combinational (state==ST_TELEM) so no register
-                // assignment needed here.
                 // -------------------------------------------------
                 if (cmd_telem) begin
                     case (telem_sel)
                         2'b00: uio_data_r <= skew_w;
                         2'b01: uio_data_r <= total_wr[7:0];
                         2'b10: uio_data_r <= total_wr[15:8];
-                        2'b11: uio_data_r <= total_wr[TOT_WIDTH-1:16];
+                        2'b11: uio_data_r <= {{(8-(TOT_WIDTH-16)){1'b0}},
+                                              total_wr[TOT_WIDTH-1:16]};
                     endcase
-                    uio_oe_r <= 1'b1;
-                    state    <= ST_TELEM;
+                    telem_vld_r <= 1'b1;
+                    uio_oe_r    <= 1'b1;
+                    state       <= ST_TELEM;
                 end
 
                 // -------------------------------------------------
                 // WRITE REQUEST
-                // move_ack has no meaning here; ignore it.
+                // move_ack is ignored here — only meaningful in
+                // ST_WAIT_ACK.
                 // -------------------------------------------------
                 else if (cmd_write) begin
                     feistel_key <= lfsr_r[5:0];
@@ -346,17 +355,22 @@ module tt_um_wearlevel_controller (
             end
 
             // =====================================================
-            // INC
+            // INC — increment wear counter (LOGICAL index) and
+            //        global write counter
             // =====================================================
             ST_INC: begin
 
-                if (cnt[phys_lat] == {CNT_WIDTH{1'b1}}) begin
-                    // Already at max — saturated, don't increment.
-                    saturated_lat <= 1'b1;
+                // FIX: index cnt[] by log_lat (logical block), not
+                // phys_lat.  Start-Gap rotates the physical mapping
+                // on every PSI writes so a physical-indexed counter
+                // would be diluted across N blocks and could never
+                // saturate within CNT_MAX writes to one logical addr.
+                if (cnt[log_lat] == {CNT_WIDTH{1'b1}}) begin
+                    saturated_lat <= 1'b1;      // already at max
                 end else begin
-                    cnt[phys_lat] <= cnt[phys_lat] + 1'b1;
-                    // Saturated if this increment brings it to max.
-                    saturated_lat <= (cnt[phys_lat] == ({CNT_WIDTH{1'b1}} - 1'b1));
+                    cnt[log_lat]  <= cnt[log_lat] + 1'b1;
+                    saturated_lat <= (cnt[log_lat] ==
+                                      ({CNT_WIDTH{1'b1}} - 1'b1));
                 end
 
                 total_wr <= total_wr + 1'b1;
@@ -377,8 +391,8 @@ module tt_um_wearlevel_controller (
                 start_next = Start_r;
 
                 if (GapCnt_r == (PSI - 1)) begin
-                    GapCnt_r  <= 3'd0;
-                    gap_next   = (Gap_r + 1'b1) % N;
+                    GapCnt_r   <= 3'd0;
+                    gap_next    = (Gap_r + 1'b1) % N;
                     if (gap_next == Start_r)
                         start_next = (Start_r + 1'b1) % N;
                 end else begin
@@ -402,6 +416,8 @@ module tt_um_wearlevel_controller (
             ST_RETIRE: begin
 
                 if (saturated_lat) begin
+                    // Retire the PHYSICAL block currently mapped to
+                    // this logical address.
                     retired[phys_lat] <= 1'b1;
                     move_req_r        <= 1'b1;
                     uio_data_r        <= {{(8-LOG2N){1'b0}}, phys_lat};
@@ -434,10 +450,19 @@ module tt_um_wearlevel_controller (
             end
 
             // =====================================================
-            // TELEM — one registered cycle; telem_vld is combinational.
-            // uio_data_r was latched in ST_IDLE on the previous edge.
+            // TELEM — hold for one full registered cycle.
+            //
+            // FIX (telem timing): do NOT clear telem_vld_r here.
+            // ST_IDLE (above) clears it on the cycle after we
+            // return.  Timeline with post-NBA reading:
+            //   T0: ST_IDLE sets telem_vld_r=1  → ST_TELEM
+            //   T1: ST_TELEM (no clear)          → ST_IDLE
+            //       post-NBA: telem_vld_r=1   ← do_telem samples ✓
+            //   T2: ST_IDLE clears telem_vld_r=0
+            //       post-NBA: telem_vld_r=0   ← pulse test checks ✓
             // =====================================================
             ST_TELEM: begin
+                // telem_vld_r is intentionally NOT cleared here.
                 uio_oe_r <= 1'b0;
                 state    <= ST_IDLE;
             end
@@ -460,10 +485,10 @@ module tt_um_wearlevel_controller (
     assign uo_out[4]   = move_req_r;
     assign uo_out[5]   = ecc_err_r;
     assign uo_out[6]   = blk_ret_r;
-    assign uo_out[7]   = telem_vld_comb;
+    assign uo_out[7]   = telem_vld_r;
 
     assign uio_out = uio_data_r;
-    assign uio_oe  = {8{uio_oe_r | telem_vld_comb}};
+    assign uio_oe  = {8{uio_oe_r}};
 
     // =========================================================
     // Formal properties (compile with `define FORMAL)
