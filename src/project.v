@@ -278,7 +278,9 @@ module tt_um_wearlevel_controller (
             // IDLE
             
             ST_IDLE: begin
-
+    			if (!cmd_telem)
+        			telem_vld_r <= 1'b0;
+        
                 if (!move_req_r)
                     uio_oe_r <= 1'b0;
 
@@ -441,7 +443,6 @@ module tt_um_wearlevel_controller (
 
             
             ST_TELEM: begin
-                telem_vld_r <= 1'b0;  
                 uio_oe_r <= 1'b0;
                 state    <= ST_IDLE;
             end
