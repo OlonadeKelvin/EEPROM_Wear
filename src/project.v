@@ -216,6 +216,7 @@ module tt_um_wearlevel_controller (
     reg busy_r, move_req_r, ecc_err_r, blk_ret_r;
     reg [7:0] uio_data_r;
     reg       uio_oe_r;
+    reg       telem_valid_r;          // FIX: registered telemetry valid
 
     reg saturated_lat;
 
@@ -252,6 +253,7 @@ module tt_um_wearlevel_controller (
 
             uio_data_r    <= 8'd0;
             uio_oe_r      <= 1'b0;
+            telem_valid_r <= 1'b0;          // FIX: reset valid
 
             phys_lat      <= 3'd0;
             log_lat       <= 3'd0;
@@ -277,6 +279,10 @@ module tt_um_wearlevel_controller (
             // IDLE
             
             ST_IDLE: begin
+                // FIX: Clear telemetry valid unless a new telemetry command arrives
+                if (!cmd_telem)
+                    telem_valid_r <= 1'b0;
+
                 if (!move_req_r)
                     uio_oe_r <= 1'b0;
 
@@ -291,9 +297,9 @@ module tt_um_wearlevel_controller (
                         2'b11: uio_data_r <= {{(8-(TOT_WIDTH-16)){1'b0}},
                                               total_wr[TOT_WIDTH-1:16]};
                     endcase
-                    
-                    uio_oe_r    <= 1'b1;
-                    state       <= ST_TELEM;
+                    telem_valid_r <= 1'b1;   // FIX: assert valid (registered)
+                    uio_oe_r      <= 1'b1;
+                    state         <= ST_TELEM;
                 end
 
                 // -------------------------------------------------
@@ -438,6 +444,9 @@ module tt_um_wearlevel_controller (
             end
 
             
+            // TELEM — hold state for one cycle, valid remains high
+            // due to previous setting; cleared later in IDLE.
+            
             ST_TELEM: begin
                 uio_oe_r <= 1'b0;
                 state    <= ST_IDLE;
@@ -461,7 +470,7 @@ module tt_um_wearlevel_controller (
     assign uo_out[4]   = move_req_r;
     assign uo_out[5]   = ecc_err_r;
     assign uo_out[6]   = blk_ret_r;
-    assign uo_out[7]   = (state == ST_TELEM);
+    assign uo_out[7]   = telem_valid_r;        // FIX: use registered output
 
     assign uio_out = uio_data_r;
     assign uio_oe  = {8{uio_oe_r}};
