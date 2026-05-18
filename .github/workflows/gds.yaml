@@ -18,6 +18,14 @@ jobs:
         with:
           pdk: sky130A
 
+      - name: Upload GDS/LEF as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gds_output
+          path: |
+            runs/wokwi/*/gds/*.gds
+            runs/wokwi/*/lef/*.lef
+
   precheck:
     needs: gds
     runs-on: ubuntu-24.04
@@ -41,7 +49,26 @@ jobs:
     needs: gds
     runs-on: ubuntu-24.04
     permissions:
-      pages: write      # to deploy to Pages
-      id-token: write   # to verify the deployment originates from an appropriate source
+      pages: write
+      id-token: write
     steps:
       - uses: TinyTapeout/tt-gds-action/viewer@ttsky26a
+
+  submit:
+    needs: [gds, precheck, gl_test, viewer]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download GDS/LEF from gds job
+        uses: actions/download-artifact@v4
+        with:
+          name: gds_output
+          path: ./artifacts
+
+      - name: Upload Tiny Tapeout submission artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tt_submission
+          path: |
+            ./artifacts/*.gds
+            ./artifacts/*.lef
+            src/project.v
