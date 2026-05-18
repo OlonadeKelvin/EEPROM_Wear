@@ -213,7 +213,7 @@ module tt_um_wearlevel_controller (
     reg [LOG2N-1:0] log_lat, scr_lat, phys_lat;
 
     // Output registers
-    reg busy_r, move_req_r, ecc_err_r, blk_ret_r, telem_vld_r;
+    reg busy_r, move_req_r, ecc_err_r, blk_ret_r;
     reg [7:0] uio_data_r;
     reg       uio_oe_r;
 
@@ -249,7 +249,6 @@ module tt_um_wearlevel_controller (
             move_req_r    <= 1'b0;
             ecc_err_r     <= 1'b0;
             blk_ret_r     <= 1'b0;
-            telem_vld_r   <= 1'b0;
 
             uio_data_r    <= 8'd0;
             uio_oe_r      <= 1'b0;
@@ -278,9 +277,6 @@ module tt_um_wearlevel_controller (
             // IDLE
             
             ST_IDLE: begin
-    			if (!cmd_telem)
-        			telem_vld_r <= 1'b0;
-        
                 if (!move_req_r)
                     uio_oe_r <= 1'b0;
 
@@ -295,7 +291,7 @@ module tt_um_wearlevel_controller (
                         2'b11: uio_data_r <= {{(8-(TOT_WIDTH-16)){1'b0}},
                                               total_wr[TOT_WIDTH-1:16]};
                     endcase
-                    telem_vld_r <= 1'b1;
+                    
                     uio_oe_r    <= 1'b1;
                     state       <= ST_TELEM;
                 end
@@ -465,7 +461,7 @@ module tt_um_wearlevel_controller (
     assign uo_out[4]   = move_req_r;
     assign uo_out[5]   = ecc_err_r;
     assign uo_out[6]   = blk_ret_r;
-    assign uo_out[7]   = telem_vld_r;
+    assign uo_out[7]   = (state == ST_TELEM);
 
     assign uio_out = uio_data_r;
     assign uio_oe  = {8{uio_oe_r}};
