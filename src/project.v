@@ -279,17 +279,6 @@ module tt_um_wearlevel_controller (
             
             ST_IDLE: begin
 
-                // FIX (telem timing): clear telem_vld_r here in
-                // ST_IDLE so it persists for the full ST_TELEM
-                // cycle.  cocotb reads post-NBA values; the
-                // sequence is:
-                //   edge T0: ST_IDLE → telem_vld_r=1, →ST_TELEM
-                //   edge T1: ST_TELEM runs (does NOT clear) → ST_IDLE
-                //            post-NBA: telem_vld_r=1  ← test samples here ✓
-                //   edge T2: ST_IDLE clears telem_vld_r=0
-                //            post-NBA: telem_vld_r=0  ← pulse test checks ✓
-                telem_vld_r <= 1'b0;
-
                 if (!move_req_r)
                     uio_oe_r <= 1'b0;
 
