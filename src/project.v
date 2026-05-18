@@ -355,7 +355,6 @@ module tt_um_wearlevel_controller (
                 // on every PSI writes so a physical-indexed counter
                 // would be diluted across N blocks and could never
                 // saturate within CNT_MAX writes to one logical addr.
-                $display("[%0t] ST_INC: log_lat=%0d, total_wr=%0d", $time, log_lat, total_wr + 1);
                 if (cnt[log_lat] == {CNT_WIDTH{1'b1}}) begin
                     saturated_lat <= 1'b1;      // already at max
                 end else begin
