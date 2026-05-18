@@ -280,6 +280,9 @@ module tt_um_wearlevel_controller (
             
             ST_IDLE: begin
 
+                // FIX: Clear telem_valid on return to IDLE
+                telem_valid_r <= 1'b0;
+
                 if (!move_req_r)
                     uio_oe_r <= 1'b0;
 
@@ -441,12 +444,14 @@ module tt_um_wearlevel_controller (
             end
 
             
-            // TELEM — hold state for one cycle, valid remains high
-            // due to previous setting; cleared later in IDLE.
+            // TELEM — hold state for one cycle with telem_valid_r
+            // staying high. Valid will be cleared on return to IDLE.
+            // FIX: Don't clear valid here; let it stay high throughout
+            // the ST_TELEM cycle so the test samples valid=1.
             
             ST_TELEM: begin
-            	telem_valid_r <= 1'b0;
-                uio_oe_r <= 1'b0;
+                // telem_valid_r stays high from previous ST_IDLE assignment
+                // uio_data_r stays valid from previous ST_IDLE latch
                 state    <= ST_IDLE;
             end
 
