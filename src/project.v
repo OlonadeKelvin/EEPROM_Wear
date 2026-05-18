@@ -33,18 +33,18 @@ module tt_um_wearlevel_controller (
     input  wire       rst_n
 );
 
-    // =========================================================
+    
     // Parameters
-    // =========================================================
+    
     localparam N         = 8;
     localparam LOG2N     = 3;
     localparam PSI       = 8;           // Gap-advance period (writes)
     localparam CNT_WIDTH = 8;           // saturating wear counter width
     localparam TOT_WIDTH = 20;          // total-write counter width
 
-    // =========================================================
+    
     // I/O decode
-    // =========================================================
+    
     wire [LOG2N-1:0] logical   = ui_in[2:0];
     wire [1:0]       cmd       = ui_in[4:3];
     wire             move_ack  = ui_in[5];
@@ -54,22 +54,22 @@ module tt_um_wearlevel_controller (
     wire cmd_write = (cmd == 2'b01);
     wire cmd_telem = (cmd == 2'b11);
 
-    // =========================================================
+    
     // Persistent Start-Gap state
-    // =========================================================
+    
     reg [LOG2N-1:0] Start_r, Gap_r;
     reg [LOG2N-1:0] Start_shd, Gap_shd;
     reg [2:0]       GapCnt_r;
 
-    // =========================================================
+    
     // Feistel LFSR — 10-bit, feedback taps [9]^[6]
-    // =========================================================
+    
     reg [9:0] lfsr_r;
     reg [5:0] feistel_key;
 
     wire [9:0] lfsr_next = {lfsr_r[8:0], lfsr_r[9] ^ lfsr_r[6]};
 
-    // =========================================================
+    
     // Wear counters (8-bit saturating, indexed by LOGICAL block)
     // and retired flags (indexed by PHYSICAL block).
     //
@@ -81,18 +81,18 @@ module tt_um_wearlevel_controller (
     // and requires retirement within that budget, which is only
     // achievable when the counter tracks the logical block's total
     // write burden.
-    // =========================================================
+    
     reg [CNT_WIDTH-1:0] cnt [0:N-1];   // indexed by logical block
     reg                 retired [0:N-1]; // indexed by physical block
 
-    // =========================================================
+    
     // Total-write counter
-    // =========================================================
+    
     reg [TOT_WIDTH-1:0] total_wr;
 
-    // =========================================================
+    
     // Hamming(6,3) ECC per 3-bit field
-    // =========================================================
+    
     function automatic [5:0] ham_enc3;
         input [2:0] d;
         begin
@@ -133,9 +133,9 @@ module tt_um_wearlevel_controller (
 
     reg [5:0] ecc_start_r, ecc_gap_r;
 
-    // =========================================================
+    
     // 2-round 3-bit Feistel scrambler
-    // =========================================================
+    
     function automatic [2:0] feistel_fn;
         input [2:0] x;
         input [5:0] k;
@@ -156,9 +156,9 @@ module tt_um_wearlevel_controller (
         end
     endfunction
 
-    // =========================================================
+    
     // Start-Gap address mapping (pure combinational)
-    // =========================================================
+    
     function automatic [LOG2N-1:0] startgap_fn;
         input [LOG2N-1:0] scr;
         input [LOG2N-1:0] s;
@@ -173,15 +173,15 @@ module tt_um_wearlevel_controller (
         end
     endfunction
 
-    // =========================================================
+    
     // Combinational read path
-    // =========================================================
+    
     wire [LOG2N-1:0] read_scr  = feistel_fn(logical, feistel_key);
     wire [LOG2N-1:0] read_phys = startgap_fn(read_scr, Start_r, Gap_r);
 
-    // =========================================================
+    
     // Telemetry: combinational max-min skew across logical blocks
-    // =========================================================
+    
     reg [CNT_WIDTH-1:0] tmax_r, tmin_r;
     integer ti;
     always @* begin
@@ -194,9 +194,9 @@ module tt_um_wearlevel_controller (
     end
     wire [CNT_WIDTH-1:0] skew_w = tmax_r - tmin_r;
 
-    // =========================================================
+    
     // FSM encoding
-    // =========================================================
+    
     localparam ST_IDLE     = 3'd0,
                ST_FEISTEL  = 3'd1,
                ST_MAP      = 3'd2,
@@ -218,16 +218,16 @@ module tt_um_wearlevel_controller (
 
     reg saturated_lat;
 
-    // =========================================================
+    
     // Combinational busy: asserts immediately when cmd_write is
     // presented in ST_IDLE so the test sees busy=1 on the same
     // post-NBA read that follows the write-command clock edge.
-    // =========================================================
+    
     wire busy_comb = busy_r | (cmd_write & (state == ST_IDLE));
 
-    // =========================================================
+    
     // FSM — sequential
-    // =========================================================
+    
     integer k;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -273,9 +273,9 @@ module tt_um_wearlevel_controller (
 
             case (state)
 
-            // =====================================================
+            
             // IDLE
-            // =====================================================
+            
             ST_IDLE: begin
 
                 // FIX (telem timing): clear telem_vld_r here in
@@ -324,17 +324,17 @@ module tt_um_wearlevel_controller (
 
             end
 
-            // =====================================================
+            
             // FEISTEL
-            // =====================================================
+            
             ST_FEISTEL: begin
                 scr_lat <= feistel_fn(log_lat, feistel_key);
                 state   <= ST_MAP;
             end
 
-            // =====================================================
+            
             // MAP
-            // =====================================================
+            
             ST_MAP: begin : ecc_blk
 
                 reg [3:0] ds, dg;
@@ -354,10 +354,10 @@ module tt_um_wearlevel_controller (
 
             end
 
-            // =====================================================
+            
             // INC — increment wear counter (LOGICAL index) and
             //        global write counter
-            // =====================================================
+            
             ST_INC: begin
 
                 // FIX: index cnt[] by log_lat (logical block), not
@@ -379,9 +379,9 @@ module tt_um_wearlevel_controller (
 
             end
 
-            // =====================================================
+            
             // ADVANCE
-            // =====================================================
+            
             ST_ADVANCE: begin : adv_blk
 
                 reg [LOG2N-1:0] gap_next;
@@ -410,9 +410,9 @@ module tt_um_wearlevel_controller (
 
             end
 
-            // =====================================================
+            
             // RETIRE
-            // =====================================================
+            
             ST_RETIRE: begin
 
                 if (saturated_lat) begin
@@ -431,9 +431,9 @@ module tt_um_wearlevel_controller (
 
             end
 
-            // =====================================================
+            
             // WAIT_ACK
-            // =====================================================
+            
             ST_WAIT_ACK: begin
 
                 busy_r     <= 1'b1;
@@ -449,20 +449,9 @@ module tt_um_wearlevel_controller (
 
             end
 
-            // =====================================================
-            // TELEM — hold for one full registered cycle.
-            //
-            // FIX (telem timing): do NOT clear telem_vld_r here.
-            // ST_IDLE (above) clears it on the cycle after we
-            // return.  Timeline with post-NBA reading:
-            //   T0: ST_IDLE sets telem_vld_r=1  → ST_TELEM
-            //   T1: ST_TELEM (no clear)          → ST_IDLE
-            //       post-NBA: telem_vld_r=1   ← do_telem samples ✓
-            //   T2: ST_IDLE clears telem_vld_r=0
-            //       post-NBA: telem_vld_r=0   ← pulse test checks ✓
-            // =====================================================
+            
             ST_TELEM: begin
-                // telem_vld_r is intentionally NOT cleared here.
+                telem_vld_r <= 1'b0;  
                 uio_oe_r <= 1'b0;
                 state    <= ST_IDLE;
             end
@@ -475,9 +464,9 @@ module tt_um_wearlevel_controller (
         end
     end
 
-    // =========================================================
+    
     // Output assignments
-    // =========================================================
+    
     wire [LOG2N-1:0] phys_out = cmd_read ? read_phys : phys_lat;
 
     assign uo_out[2:0] = phys_out;
@@ -490,9 +479,9 @@ module tt_um_wearlevel_controller (
     assign uio_out = uio_data_r;
     assign uio_oe  = {8{uio_oe_r}};
 
-    // =========================================================
+    
     // Formal properties (compile with `define FORMAL)
-    // =========================================================
+    
 `ifdef FORMAL
     reg [TOT_WIDTH-1:0] f_prev;
     always @(posedge clk) f_prev <= total_wr;
