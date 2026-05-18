@@ -41,6 +41,7 @@ module tt_um_wearlevel_controller (
     localparam TOT_WIDTH = 20;          // total-write counter width
     localparam N_MASK = 3'b111;
     localparam PSI_MINUS_1 = 3'd7;      // because PSI=8
+    localparam CNT_MAX = {CNT_WIDTH{1'b1}};      // 0xFF
 
     // I/O decode
     wire [LOG2N-1:0] logical   = ui_in[2:0];
@@ -183,13 +184,12 @@ module tt_um_wearlevel_controller (
     reg busy_r, move_req_r, ecc_err_r, blk_ret_r;
     reg [7:0] uio_data_r;
     reg       uio_oe_r;
-    reg       telem_valid_r;          // registered telemetry valid
+    reg       telem_valid_r;
 
     reg saturated_lat;
 
     // Combinational busy: asserts immediately when cmd_write is
-    // presented in ST_IDLE so the test sees busy=1 on the same
-    // post-NBA read that follows the write-command clock edge.
+    // presented in ST_IDLE so the test sees busy=1 on the same cycle.
     wire busy_comb = busy_r | (cmd_write & (state == ST_IDLE));
 
     // FSM — sequential
@@ -240,9 +240,6 @@ module tt_um_wearlevel_controller (
 
             // IDLE
             ST_IDLE: begin
-                // Clear telem_valid on return to IDLE
-                telem_valid_r <= 1'b0;
-
                 if (!move_req_r)
                     uio_oe_r <= 1'b0;
 
@@ -254,22 +251,21 @@ module tt_um_wearlevel_controller (
                         2'b10: uio_data_r <= total_wr[15:8];
                         2'b11: uio_data_r <= {{(8-(TOT_WIDTH-16)){1'b0}}, total_wr[TOT_WIDTH-1:16]};
                     endcase
-                    // assert valid for the ST_TELEM cycle (registered here)
                     telem_valid_r <= 1'b1;
                     uio_oe_r      <= 1'b1;
                     state         <= ST_TELEM;
                 end
 
-                // WRITE REQUEST: latch logical and mark busy -> pipeline
+                // WRITE REQUEST: latch logical, increment total, and mark busy
                 else if (cmd_write) begin
                     feistel_key <= lfsr_r[5:0];
                     log_lat     <= logical;
                     busy_r      <= 1'b1;
+                    total_wr    <= total_wr + 20'd1;   // increment total writes here
                     state       <= ST_FEISTEL;
                 end
 
-                // reads are combinational — no state change
-
+                // Reads are purely combinational — no state change
             end
 
             // FEISTEL
@@ -293,18 +289,15 @@ module tt_um_wearlevel_controller (
                 state <= ST_INC;
             end
 
-            // INC — increment wear counter (LOGICAL index) and total counter
+            // INC — increment wear counter (LOGICAL index)
             ST_INC: begin
-                // index cnt[] by log_lat (logical block)
-                if (cnt[log_lat] == {CNT_WIDTH{1'b1}}) begin
-                    saturated_lat <= 1'b1;      // already at max
+                if (cnt[log_lat] < CNT_MAX) begin
+                    cnt[log_lat] <= cnt[log_lat] + 1'b1;
+                    // detect saturation: if before increment it was CNT_MAX-1
+                    saturated_lat <= (cnt[log_lat] == (CNT_MAX - 1'b1));
                 end else begin
-                    cnt[log_lat]  <= cnt[log_lat] + 1'b1;
-                    saturated_lat <= (cnt[log_lat] == ({CNT_WIDTH{1'b1}} - 1'b1));
+                    saturated_lat <= 1'b1;   // already saturated
                 end
-
-                total_wr <= total_wr + 20'd1;
-
                 state <= ST_ADVANCE;
             end
 
@@ -316,7 +309,7 @@ module tt_um_wearlevel_controller (
                 gap_next   = Gap_r;
                 start_next = Start_r;
 
-                if (GapCnt_r == (PSI_MINUS_1)) begin
+                if (GapCnt_r == PSI_MINUS_1) begin
                     GapCnt_r   <= 3'd0;
                     gap_next    = (Gap_r + 1'b1) & N_MASK;
                     if (gap_next == Start_r)
@@ -338,7 +331,6 @@ module tt_um_wearlevel_controller (
             // RETIRE — if saturated, request move and hold busy/move_req until ack
             ST_RETIRE: begin
                 if (saturated_lat) begin
-                    // Retire the PHYSICAL block currently mapped to this logical address.
                     retired[phys_lat] <= 1'b1;
                     move_req_r        <= 1'b1;
                     uio_data_r        <= {{(8-LOG2N){1'b0}}, phys_lat};
@@ -365,16 +357,14 @@ module tt_um_wearlevel_controller (
                 end
             end
 
-            // TELEM — remain for one cycle with telem_valid_r already high
+            // TELEM — one cycle only: clear valid and output enable
             ST_TELEM: begin
-                // telem_valid_r and uio_data_r were set in ST_IDLE; stay one cycle
-                state    <= ST_IDLE;
+                telem_valid_r <= 1'b0;
+                uio_oe_r      <= 1'b0;
+                state         <= ST_IDLE;
             end
 
-            default: begin
-                state <= ST_IDLE;
-            end
-
+            default: state <= ST_IDLE;
             endcase
         end
     end
@@ -383,11 +373,11 @@ module tt_um_wearlevel_controller (
     wire [LOG2N-1:0] phys_out = cmd_read ? read_phys : phys_lat;
 
     assign uo_out[2:0] = phys_out;
-    assign uo_out[3]   = cmd_read ? 1'b0 : busy_comb;
+    assign uo_out[3]   = busy_comb;                     // removed cmd_read mask
     assign uo_out[4]   = move_req_r;
     assign uo_out[5]   = ecc_err_r;
     assign uo_out[6]   = blk_ret_r;
-    assign uo_out[7]   = telem_valid_r;        // registered output
+    assign uo_out[7]   = telem_valid_r;                 // registered one‑cycle pulse
 
     assign uio_out = uio_data_r;
     assign uio_oe  = {8{uio_oe_r}};
