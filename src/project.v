@@ -279,9 +279,6 @@ module tt_um_wearlevel_controller (
             // IDLE
             
             ST_IDLE: begin
-                // FIX: Clear telemetry valid unless a new telemetry command arrives
-                if (!cmd_telem)
-                    telem_valid_r <= 1'b0;
 
                 if (!move_req_r)
                     uio_oe_r <= 1'b0;
@@ -448,6 +445,7 @@ module tt_um_wearlevel_controller (
             // due to previous setting; cleared later in IDLE.
             
             ST_TELEM: begin
+            	telem_valid_r <= 1'b0;
                 uio_oe_r <= 1'b0;
                 state    <= ST_IDLE;
             end
