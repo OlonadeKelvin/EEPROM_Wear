@@ -39,7 +39,7 @@ async def reset_dut(dut):
     dut.ui_in.value  = 0
     dut.uio_in.value = 0
     dut.ena.value    = 1
-    await Timer(40, units="ns")
+    await Timer(40, unit="ns")
     await RisingEdge(dut.clk)
     dut.rst_n.value  = 1
     await ClockCycles(dut.clk, 3)   # allow internals to settle
@@ -128,7 +128,7 @@ async def do_telem(dut, sel):
 @cocotb.test()
 async def test_reset_defaults(dut):
     """After reset all status flags clear; phys output in valid range."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     assert _busy(dut)      == 0, "busy not clear after reset"
@@ -144,7 +144,7 @@ async def test_reset_defaults(dut):
 @cocotb.test()
 async def test_read_never_asserts_busy(dut):
     """Reads are combinational — busy must stay 0 for all logical addresses."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     for addr in range(N):
@@ -155,7 +155,7 @@ async def test_read_never_asserts_busy(dut):
 @cocotb.test()
 async def test_read_phys_in_range(dut):
     """Every logical address maps to a physical address in [0, N-1]."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     for addr in range(N):
@@ -169,7 +169,7 @@ async def test_write_busy_asserts_and_clears(dut):
     One clock after a write cmd, busy must be 1.
     After the pipeline drains, busy must be 0.
     """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     dut.ui_in.value = _ui(CMD_WRITE, 0)
@@ -184,7 +184,7 @@ async def test_write_busy_asserts_and_clears(dut):
 @cocotb.test()
 async def test_write_phys_in_range(dut):
     """phys output must always be in [0, N-1] for every write."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     for i in range(N * 2):
@@ -195,7 +195,7 @@ async def test_write_phys_in_range(dut):
 @cocotb.test()
 async def test_write_increments_total(dut):
     """3 writes → total_wr_lo == 3 (verified via telemetry)."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     for i in range(3):
@@ -212,7 +212,7 @@ async def test_no_retirement_under_saturation(dut):
     PSI-1 writes to the same logical block must complete without any
     retirement (wear counters do not reach 0xFF in 7 writes).
     """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     for i in range(PSI - 1):
@@ -228,7 +228,7 @@ async def test_gap_advances_causing_rotation(dut):
     After PSI*2 writes to the same logical address, the Start-Gap rotation
     must have targeted more than one physical block.
     """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     seen = set()
@@ -245,7 +245,7 @@ async def test_gap_advances_causing_rotation(dut):
 @cocotb.test()
 async def test_no_ecc_error_clean_run(dut):
     """ECC error flag stays clear during normal operation."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     for i in range(16):
@@ -259,7 +259,7 @@ async def test_telem_valid_is_one_cycle_pulse(dut):
     telem_valid must be 1 exactly on the ST_TELEM cycle,
     then 0 when back in ST_IDLE.
     """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     # Edge 0: send telem cmd
@@ -282,7 +282,7 @@ async def test_telem_skew_bounded(dut):
     After PSI*N evenly distributed writes, reported skew ≤ PSI+1
     (Start-Gap theoretical bound).
     """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     for i in range(PSI * N):
@@ -301,7 +301,7 @@ async def test_telem_total_write_16bit(dut):
     Perform WRITES_COUNT writes; reconstruct 16-bit total_wr from
     lo + hi telemetry bytes and verify it matches.
     """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     WRITES_COUNT = 25
@@ -327,7 +327,7 @@ async def test_retirement_on_saturation(dut):
       • move_req de-asserts after move_ack
       • busy clears
     """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     retirement_seen = False
@@ -374,7 +374,7 @@ async def test_retirement_on_saturation(dut):
 @cocotb.test()
 async def test_move_req_held_until_ack(dut):
     """move_req must stay asserted every cycle until move_ack is received."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     # Flood to saturation
@@ -411,7 +411,7 @@ async def test_move_req_held_until_ack(dut):
 @cocotb.test()
 async def test_all_logical_addresses_writable(dut):
     """Every logical block (0–7) can be written without hang or error."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     for addr in range(N):
@@ -426,7 +426,7 @@ async def test_interleaved_reads_and_writes(dut):
     Interleave reads between writes.
     Reads must never assert busy; writes must always complete cleanly.
     """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     for i in range(16):
@@ -443,7 +443,7 @@ async def test_stress_random_200(dut):
     Verifies: no hangs, phys always in range, total_wr counter correct.
     Uses a deterministic LCG for reproducibility.
     """
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
  
     # Knuth multiplicative LCG
