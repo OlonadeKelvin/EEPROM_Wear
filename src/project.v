@@ -1,10 +1,26 @@
 /*
- * tt_um_wearlevel_controller - Hardware EEPROM Wear-Leveling Controller
+ * tt_um_wearlevel_controller
  *
- * Single-tile digital IP for dynamic wear-leveling of external EEPROM/flash.
- * Tracks write counts per physical block and automatically remaps logical
- * addresses when a wear imbalance exceeds a fixed threshold.
+ * Hardware Wear-Leveling Controller
+ * ─────────────────────────────────────────────────
+ *   ui_in[2:0]  logical block address (0..N-1)
+ *   ui_in[4:3]  cmd  00=read_req  01=write_req  10=write_commit  11=telem_req
+ *   ui_in[5]    move_ack  (external agent confirms data copy done)
+ *   ui_in[7:6]  telem_sel 00=max_min_skew 01=total_writes_lo 10=total_writes_hi
+ *               (only sampled when cmd==11)
+ *
+ *   uo_out[2:0] physical block address (result of current mapping)
+ *   uo_out[3]   busy
+ *   uo_out[4]   move_req  (ask agent to copy phys→uio_out[2:0])
+ *   uo_out[5]   ecc_error (single-bit corrected — informational)
+ *   uo_out[6]   block_retired (the accessed physical block is retired)
+ *   uo_out[7]   telem_valid
+ *
+ *   uio_out[7:0] move_dest[2:0] || telem_data[7:0] (muxed)
+ *   uio_oe       driven when move_req || telem_valid
  */
+
+`default_nettype none
 
 module tt_um_wearlevel_controller (
     input  wire [7:0] ui_in,
@@ -18,196 +34,377 @@ module tt_um_wearlevel_controller (
 );
 
     // Parameters
-    localparam NUM_BLOCKS = 4;
-    localparam THRESHOLD  = 4;
-    localparam CNT_WIDTH  = 16;
+    localparam N         = 8;
+    localparam LOG2N     = 3;
+    localparam PSI       = 8;           // Gap-advance period (writes)
+    localparam CNT_WIDTH = 8;           // saturating wear counter width
+    localparam TOT_WIDTH = 20;          // total-write counter width
+    localparam N_MASK = 3'b111;
+    localparam PSI_MINUS_1 = 3'd7;      // because PSI=8
+    localparam CNT_MAX = {CNT_WIDTH{1'b1}};      // 0xFF
 
-    // States
-    localparam IDLE       = 3'd0,
-               S_INC      = 3'd1,
-               S_MIN      = 3'd2,
-               S_CHECK    = 3'd3,
-               S_FIND_LOG = 3'd4,
-               S_SWAP     = 3'd5,
-               S_WAIT_ACK = 3'd6;
+    // I/O decode
+    wire [LOG2N-1:0] logical   = ui_in[2:0];
+    wire [1:0]       cmd       = ui_in[4:3];
+    wire             move_ack  = ui_in[5];
+    wire [1:0]       telem_sel = ui_in[7:6];
 
-    // Registers for internal state
-    reg [2:0] map [0:NUM_BLOCKS-1];                 // logical -> physical
-    reg [CNT_WIDTH-1:0] wr_count [0:NUM_BLOCKS-1];  // wear counters
+    wire cmd_read  = (cmd == 2'b00);
+    wire cmd_write = (cmd == 2'b01);
+    wire cmd_telem = (cmd == 2'b11);
 
-    reg [2:0] state, next_state;
-    reg       write_pending;
-    reg [2:0] last_logical, last_physical;
-    reg [2:0] phys_out;
-    reg       busy, move_req;
-    reg [2:0] uio_data;
-    reg [2:0] uio_oe_reg;
+    // Persistent Start-Gap state
+    reg [LOG2N-1:0] Start_r, Gap_r;
+    reg [LOG2N-1:0] Start_shd, Gap_shd;
+    reg [2:0]       GapCnt_r;
 
-    // Min-search storage
-    reg [CNT_WIDTH-1:0] min_val_reg;
-    reg [2:0]           min_idx_reg;
-    reg [2:0]           swap_logical_reg;
-    reg                 remap_needed;
+    // Feistel LFSR — 10-bit, feedback taps [9]^[6]
+    reg [9:0] lfsr_r;
+    reg [5:0] feistel_key;
+    wire [9:0] lfsr_next = {lfsr_r[8:0], lfsr_r[9] ^ lfsr_r[6]};
 
-    // Command decoding
-    wire [2:0] addr = ui_in[2:0];
-    wire [1:0] cmd  = ui_in[4:3];
-    wire       move_ack = ui_in[5];
+    // Wear counters (8-bit saturating, indexed by LOGICAL block)
+    // retired flags indexed by PHYSICAL block
+    reg [CNT_WIDTH-1:0] cnt [0:N-1];   // indexed by logical block
+    reg                 retired [0:N-1]; // indexed by physical block
 
-    wire cmd_read_req   = (cmd == 2'b00);
-    wire cmd_write_req  = (cmd == 2'b01);
-    wire cmd_write_commit = (cmd == 2'b10);
+    // Total-write counter
+    reg [TOT_WIDTH-1:0] total_wr;
 
-    // Current physical address for a read/write request
-    wire [2:0] req_phys = map[addr];
+    // Hamming(6,3) ECC per 3-bit field
+    function automatic [5:0] ham_enc3;
+        input [2:0] d;
+        begin
+            ham_enc3[0] = d[0] ^ d[1];
+            ham_enc3[1] = d[0] ^ d[2];
+            ham_enc3[2] = d[0];
+            ham_enc3[3] = d[1] ^ d[2];
+            ham_enc3[4] = d[1];
+            ham_enc3[5] = d[2];
+        end
+    endfunction
 
-    // --------------------------------------------------------
-    // Combinational min-search (unrolled for 4 blocks)
-    // --------------------------------------------------------
-    wire [CNT_WIDTH-1:0] cnt0 = wr_count[0];
-    wire [CNT_WIDTH-1:0] cnt1 = wr_count[1];
-    wire [CNT_WIDTH-1:0] cnt2 = wr_count[2];
-    wire [CNT_WIDTH-1:0] cnt3 = wr_count[3];
+    function automatic [3:0] ham_dec3;
+        input [5:0] c;
+        reg [2:0] s;
+        reg [5:0] cc;
+        begin
+            s[0] = c[0] ^ c[2] ^ c[4];
+            s[1] = c[1] ^ c[2] ^ c[5];
+            s[2] = c[3] ^ c[4] ^ c[5];
+            cc = c;
+            if (s != 3'b000) begin
+                case (s)
+                    3'd1: cc[0] = ~c[0];
+                    3'd2: cc[1] = ~c[1];
+                    3'd3: cc[2] = ~c[2];
+                    3'd4: cc[3] = ~c[3];
+                    3'd5: cc[4] = ~c[4];
+                    3'd6: cc[5] = ~c[5];
+                    default: cc = c;
+                endcase
+                ham_dec3 = {1'b1, cc[5], cc[4], cc[2]};
+            end else begin
+                ham_dec3 = {1'b0, c[5], c[4], c[2]};
+            end
+        end
+    endfunction
 
-    // Cascade comparison
-    wire [CNT_WIDTH-1:0] min01 = (cnt0 < cnt1) ? cnt0 : cnt1;
-    wire [2:0]           idx01 = (cnt0 < cnt1) ? 3'd0 : 3'd1;
+    reg [5:0] ecc_start_r, ecc_gap_r;
 
-    wire [CNT_WIDTH-1:0] min23 = (cnt2 < cnt3) ? cnt2 : cnt3;
-    wire [2:0]           idx23 = (cnt2 < cnt3) ? 3'd2 : 3'd3;
+    // 2-round 3-bit Feistel scrambler
+    function automatic [2:0] feistel_fn;
+        input [2:0] x;
+        input [5:0] k;
+        reg [1:0] L;
+        reg       R, t, newR;
+        begin
+            L = x[2:1];
+            R = x[0];
+            t    = R ^ k[0];
+            newR = L[0] ^ t;
+            L    = {1'b0, R};
+            R    = newR;
+            t    = R ^ k[3];
+            newR = L[0] ^ t;
+            L    = {1'b0, R};
+            R    = newR;
+            feistel_fn = {L[1:0], R};
+        end
+    endfunction
 
-    wire [CNT_WIDTH-1:0] min_val_comb = (min01 < min23) ? min01 : min23;
-    wire [2:0]           min_idx_comb = (min01 < min23) ? idx01 : idx23;
+    // Start-Gap address mapping (pure combinational)
+    function automatic [LOG2N-1:0] startgap_fn;
+        input [LOG2N-1:0] scr;
+        input [LOG2N-1:0] s;
+        input [LOG2N-1:0] g;
+        reg [LOG2N-1:0] p;
+        begin
+            if (scr < g)
+                p = (scr + s) & N_MASK;
+            else
+                p = (scr + s + 1) & N_MASK;
+            startgap_fn = p;
+        end
+    endfunction
 
-    // --------------------------------------------------------
-    // Combinational find logical block for a physical index
-    // --------------------------------------------------------
-    reg [2:0] swap_logical;
-    integer j;
-    integer i;
+    // Combinational read path
+    wire [LOG2N-1:0] read_scr  = feistel_fn(logical, feistel_key);
+    wire [LOG2N-1:0] read_phys = startgap_fn(read_scr, Start_r, Gap_r);
+
+    // Telemetry: combinational max-min skew across logical blocks
+    reg [CNT_WIDTH-1:0] tmax_r, tmin_r;
+    integer ti;
     always @* begin
-        swap_logical = 3'd0;
-        for (j = 0; j < NUM_BLOCKS; j = j+1)
-            if (map[j] == min_idx_reg)
-                swap_logical = j[2:0];
+        tmax_r = cnt[0];
+        tmin_r = cnt[0];
+        for (ti = 1; ti < N; ti = ti + 1) begin
+            if (cnt[ti] > tmax_r) tmax_r = cnt[ti];
+            if (cnt[ti] < tmin_r) tmin_r = cnt[ti];
+        end
     end
+    wire [CNT_WIDTH-1:0] skew_w = tmax_r - tmin_r;
 
-    // --------------------------------------------------------
-    // Sequential FSM
-    // --------------------------------------------------------
+    // FSM encoding
+    localparam ST_IDLE     = 3'd0,
+               ST_FEISTEL  = 3'd1,
+               ST_MAP      = 3'd2,
+               ST_INC      = 3'd3,
+               ST_ADVANCE  = 3'd4,
+               ST_RETIRE   = 3'd5,
+               ST_WAIT_ACK = 3'd6,
+               ST_TELEM    = 3'd7;
+
+    reg [2:0] state;
+
+    // Pipeline latches
+    reg [LOG2N-1:0] log_lat, scr_lat, phys_lat;
+
+    // Output registers
+    reg busy_r, move_req_r, ecc_err_r, blk_ret_r;
+    reg [7:0] uio_data_r;
+    reg       uio_oe_r;
+    reg       telem_valid_r;
+
+    reg saturated_lat;
+
+    // Combinational busy: asserts immediately when cmd_write is
+    // presented in ST_IDLE so the test sees busy=1 on the same cycle.
+    wire busy_comb = busy_r | (cmd_write & (state == ST_IDLE));
+
+    // FSM — sequential
+    integer k;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= IDLE;
-            write_pending <= 1'b0;
-            busy <= 1'b0;
-            move_req <= 1'b0;
-            uio_oe_reg <= 3'b000;
-            uio_data <= 3'b000;
-            phys_out <= 3'd0;
-            min_val_reg <= 0;
-            min_idx_reg <= 0;
-            swap_logical_reg <= 0;
-            remap_needed <= 1'b0;
-            // initialise mapping and counters
-            for (i = 0; i < NUM_BLOCKS; i = i+1) begin
-                map[i] <= i[2:0];
-                wr_count[i] <= 0;
+            state         <= ST_IDLE;
+
+            Start_r       <= 3'd0;
+            Gap_r         <= 3'd0;
+            Start_shd     <= 3'd0;
+            Gap_shd       <= 3'd0;
+            GapCnt_r      <= 3'd0;
+
+            lfsr_r        <= 10'h3FF;
+            feistel_key   <= 6'h3F;
+
+            total_wr      <= {TOT_WIDTH{1'b0}};
+
+            busy_r        <= 1'b0;
+            move_req_r    <= 1'b0;
+            ecc_err_r     <= 1'b0;
+            blk_ret_r     <= 1'b0;
+
+            uio_data_r    <= 8'd0;
+            uio_oe_r      <= 1'b0;
+            telem_valid_r <= 1'b0;
+
+            phys_lat      <= {LOG2N{1'b0}};
+            log_lat       <= {LOG2N{1'b0}};
+            scr_lat       <= {LOG2N{1'b0}};
+
+            saturated_lat <= 1'b0;
+
+            ecc_start_r   <= ham_enc3(3'd0);
+            ecc_gap_r     <= ham_enc3(3'd0);
+
+            for (k = 0; k < N; k = k + 1) begin
+                cnt[k]     <= {CNT_WIDTH{1'b0}};
+                retired[k] <= 1'b0;
             end
+
         end else begin
-            state <= next_state;
 
-            // Capture write request
-            if (state == IDLE && cmd_write_req && !busy) begin
-                last_logical <= addr;
-                last_physical <= req_phys;
-                write_pending <= 1'b1;
-            end
-
-            if (state == IDLE && cmd_write_commit && write_pending) begin
-                write_pending <= 1'b0;
-            end
+            lfsr_r <= lfsr_next;
 
             case (state)
-                IDLE: begin
-                    busy <= 1'b0;
-                    move_req <= 1'b0;
-                    uio_oe_reg <= 3'b000;
-                    if (cmd_read_req || cmd_write_req)
-                        phys_out <= req_phys;
+
+            // IDLE
+            ST_IDLE: begin
+                if (!move_req_r)
+                    uio_oe_r <= 1'b0;
+
+                // TELEMETRY REQUEST: sample telem_sel and prepare output
+                if (cmd_telem) begin
+                    case (telem_sel)
+                        2'b00: uio_data_r <= skew_w;
+                        2'b01: uio_data_r <= total_wr[7:0];
+                        2'b10: uio_data_r <= total_wr[15:8];
+                        2'b11: uio_data_r <= {{(8-(TOT_WIDTH-16)){1'b0}}, total_wr[TOT_WIDTH-1:16]};
+                    endcase
+                    telem_valid_r <= 1'b1;
+                    uio_oe_r      <= 1'b1;
+                    state         <= ST_TELEM;
                 end
 
-                S_INC: begin
-                    wr_count[last_physical] <= wr_count[last_physical] + 1;
-                    busy <= 1'b1;
+                // WRITE REQUEST: latch logical, increment total, and mark busy
+                else if (cmd_write) begin
+                    feistel_key <= lfsr_r[5:0];
+                    log_lat     <= logical;
+                    busy_r      <= 1'b1;
+                    total_wr    <= total_wr + 20'd1;   // increment total writes here
+                    state       <= ST_FEISTEL;
                 end
 
-                S_MIN: begin
-                    min_val_reg <= min_val_comb;
-                    min_idx_reg <= min_idx_comb;
-                    busy <= 1'b1;
+                // Reads are purely combinational — no state change
+            end
+
+            // FEISTEL
+            ST_FEISTEL: begin
+                scr_lat <= feistel_fn(log_lat, feistel_key);
+                state   <= ST_MAP;
+            end
+
+            // MAP
+            ST_MAP: begin : ecc_blk
+                reg [3:0] ds, dg;
+                ds = ham_dec3(ecc_start_r);
+                dg = ham_dec3(ecc_gap_r);
+
+                ecc_err_r <= ds[3] | dg[3];
+
+                phys_lat <= startgap_fn(scr_lat, ds[2:0], dg[2:0]);
+
+                blk_ret_r <= retired[startgap_fn(scr_lat, ds[2:0], dg[2:0])];
+
+                state <= ST_INC;
+            end
+
+            // INC — increment wear counter (LOGICAL index)
+            ST_INC: begin
+                if (cnt[log_lat] < CNT_MAX) begin
+                    cnt[log_lat] <= cnt[log_lat] + 1'b1;
+                    // detect saturation: if before increment it was CNT_MAX-1
+                    saturated_lat <= (cnt[log_lat] == (CNT_MAX - 1'b1));
+                end else begin
+                    saturated_lat <= 1'b1;   // already saturated
+                end
+                state <= ST_ADVANCE;
+            end
+
+            // ADVANCE (Start/Gap rotation accounting)
+            ST_ADVANCE: begin : adv_blk
+                reg [LOG2N-1:0] gap_next;
+                reg [LOG2N-1:0] start_next;
+
+                gap_next   = Gap_r;
+                start_next = Start_r;
+
+                if (GapCnt_r == PSI_MINUS_1) begin
+                    GapCnt_r   <= 3'd0;
+                    gap_next    = (Gap_r + 1'b1) & N_MASK;
+                    if (gap_next == Start_r)
+                        start_next = (Start_r + 1'b1) & N_MASK;
+                end else begin
+                    GapCnt_r <= GapCnt_r + 1'b1;
                 end
 
-                S_CHECK: begin
-                    if ((wr_count[last_physical] - min_val_reg) > THRESHOLD)
-                        remap_needed <= 1'b1;
-                    else
-                        remap_needed <= 1'b0;
-                    busy <= 1'b1;
-                end
+                Start_r     <= start_next;
+                Gap_r       <= gap_next;
+                ecc_start_r <= ham_enc3(start_next);
+                ecc_gap_r   <= ham_enc3(gap_next);
+                Start_shd   <= start_next;
+                Gap_shd     <= gap_next;
 
-                S_FIND_LOG: begin
-                    swap_logical_reg <= swap_logical;
-                    busy <= 1'b1;
-                end
+                state <= ST_RETIRE;
+            end
 
-                S_SWAP: begin
-                    map[last_logical] <= min_idx_reg;
-                    map[swap_logical_reg] <= last_physical;
-                    move_req <= 1'b1;
-                    uio_oe_reg <= 3'b111;
-                    uio_data <= min_idx_reg;
-                    phys_out <= last_physical;
-                    busy <= 1'b1;
+            // RETIRE — if saturated, request move and hold busy/move_req until ack
+            ST_RETIRE: begin
+                if (saturated_lat) begin
+                    retired[phys_lat] <= 1'b1;
+                    move_req_r        <= 1'b1;
+                    uio_data_r        <= {{(8-LOG2N){1'b0}}, phys_lat};
+                    uio_oe_r          <= 1'b1;
+                    busy_r            <= 1'b1;
+                    state             <= ST_WAIT_ACK;
+                end else begin
+                    busy_r <= 1'b0;
+                    state  <= ST_IDLE;
                 end
+            end
 
-                S_WAIT_ACK: begin
-                    if (move_ack) begin
-                        move_req <= 1'b0;
-                        uio_oe_reg <= 3'b000;
-                        busy <= 1'b0;
-                    end else begin
-                        busy <= 1'b1;
-                    end
+            // WAIT_ACK — hold move_req and busy until move_ack asserted
+            ST_WAIT_ACK: begin
+                busy_r     <= 1'b1;
+                move_req_r <= 1'b1;
+                uio_oe_r   <= 1'b1;
+
+                if (move_ack) begin
+                    move_req_r <= 1'b0;
+                    uio_oe_r   <= 1'b0;
+                    busy_r     <= 1'b0;
+                    state      <= ST_IDLE;
                 end
+            end
 
-                default: busy <= 1'b0;
+            // TELEM — one cycle only: clear valid and output enable
+            ST_TELEM: begin
+                telem_valid_r <= 1'b0;
+                uio_oe_r      <= 1'b0;
+                state         <= ST_IDLE;
+            end
+
+            default: state <= ST_IDLE;
             endcase
         end
     end
 
-    // Next state logic
-    always @* begin
-        next_state = state;
-        case (state)
-            IDLE:       next_state = (write_pending && cmd_write_commit) ? S_INC : IDLE;
-            S_INC:      next_state = S_MIN;
-            S_MIN:      next_state = S_CHECK;
-            S_CHECK:    next_state = remap_needed ? S_FIND_LOG : IDLE;
-            S_FIND_LOG: next_state = S_SWAP;
-            S_SWAP:     next_state = S_WAIT_ACK;
-            S_WAIT_ACK: next_state = move_ack ? IDLE : S_WAIT_ACK;
-            default:    next_state = IDLE;
-        endcase
-    end
+    // Output assignments
+    wire [LOG2N-1:0] phys_out = cmd_read ? read_phys : phys_lat;
 
     assign uo_out[2:0] = phys_out;
-    assign uo_out[3]   = busy;
-    assign uo_out[4]   = move_req;
-    assign uo_out[7:5] = 3'b000;
+    assign uo_out[3]   = busy_comb;                     // removed cmd_read mask
+    assign uo_out[4]   = move_req_r;
+    assign uo_out[5]   = ecc_err_r;
+    assign uo_out[6]   = blk_ret_r;
+    assign uo_out[7]   = telem_valid_r;                 // registered one‑cycle pulse
 
-    assign uio_out[2:0] = uio_data;
-    assign uio_out[7:3] = 5'b00000;
-    assign uio_oe[2:0]  = uio_oe_reg;
-    assign uio_oe[7:3]  = 5'b00000;
+    assign uio_out = uio_data_r;
+    assign uio_oe  = {8{uio_oe_r}};
+
+`ifdef FORMAL
+    reg [TOT_WIDTH-1:0] f_prev;
+    always @(posedge clk) f_prev <= total_wr;
+
+    always @(posedge clk)
+        if (rst_n) assert(total_wr >= f_prev);
+
+    always @(posedge clk)
+        if (rst_n) assert(skew_w <= PSI + 1);
+
+    always @(posedge clk)
+        if (rst_n) assert(GapCnt_r < PSI);
+
+    always @(posedge clk)
+        if (rst_n) begin
+            assert(Start_r < N);
+            assert(Gap_r   < N);
+        end
+
+    cover property (
+        @(posedge clk) disable iff (!rst_n)
+        $rose(busy_r) ##[1:32] $fell(busy_r)
+    );
+`endif
 
 endmodule

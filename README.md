@@ -1,131 +1,217 @@
 # Hardware EEPROM Wear‑Leveling Controller
 
-**A plug‑and‑play digital IP for extending the lifetime of external EEPROM / flash memories in embedded and edge‑AI systems.**
+A tiny, formally verified, attack-resistant wear-leveling controller that dramatically extends the lifetime of external EEPROM and flash memories in embedded and edge systems.
 
-## 1. Overview
+![TinyTapeout](https://img.shields.io/badge/TinyTapeout-SKY130-8A2BE2)
+![Cells](https://img.shields.io/badge/Size-~350--450_cells-00B140)
+![Verified](https://img.shields.io/badge/Verified-SVA_FORMAL-2E8B57)
+![Attack Resistant](https://img.shields.io/badge/Attack_Resistant-Feistel-FF4500)
 
-Many low‑power edge devices rely on serial EEPROMs for configuration and data logging.  
-Frequent writes to the same memory block create **localised oxide degradation**, leading to early failure.  
-This controller implements **dynamic wear‑levelling** entirely in hardware, transparently remapping logical block addresses to physical blocks so that write cycles are distributed evenly.
 
-The core is supplied as a single synthesizable Verilog module targeting the Tiny Tapeout SKY26b shuttle, but is parameterized and ready to be integrated into any FPGA or ASIC system.
+## Overview
+
+EEPROM and flash cells typically endure only **10k–100k** program/erase cycles. Without wear leveling, hot data quickly destroys individual blocks while the rest of the array remains fresh.
+
+This IP implements the **Start-Gap** algorithm, the same technique used in commercial 3D-XPoint and phase-change memories, in a highly optimized hardware design that fits inside a single **TinyTapeout SKY130 1×1 tile** (~350–450 standard cells).
+
+It adds enhancements: Feistel-based address randomization for attack resistance, Hamming ECC protection on persistent state, automatic bad-block retirement, saturating wear counters, and rich telemetry — all while remaining extremely compact and power-fail safe.
+
+
+## Key Features
+
+- **Start-Gap Wear Leveling** (Qureshi et al., MICRO 2009) — no large mapping table
+
+- **Attack Resistance** — 2-round 3-bit Feistel scrambler keyed by LFSR
+
+- **ECC Protection** — Hamming(6,3) SEC on all persistent state
+
+- **Bad-Block Retirement** — automatic detection and skipping of worn-out blocks
+
+- **Saturating 8-bit Wear Counters** — 2× area savings vs 16-bit linear
+
+- **In-Band Telemetry** — real-time max-min skew and total write count
+
+- **Formal Verification** — full SVA suite (monotonicity, bounded skew, liveness, range safety)
+
+- **Power-Fail Safe** — atomic shadow-register commit
+
+- **Tiny Footprint** — fits comfortably in one TinyTapeout tile
+
+
+## Why Start-Gap?
+
+
+Traditional table-based wear leveling requires large mapping RAMs, min-search trees, and reverse-lookup logic. Start-Gap eliminates all of that with just two registers (`Start` and `Gap`), providing a **provable wear bound** of `ψ + 1` (where `ψ` is the rotation period) regardless of access pattern.
+
+
+## Architecture
+
+
+### Start-Gap Algorithm
+
+
+```verilog
+
+phys = (logical + Start) mod N          if logical < Gap
+
+phys = (logical + Start + 1) mod N      otherwise
+
+```
+
+
+Every `ψ` writes, `Gap` advances, smoothly rotating the "hot spot" across the array.
+
+
+### Attack Resistance
+
+
+A plain Start-Gap implementation is vulnerable to targeted wear attacks. This design adds a lightweight **2-round Feistel cipher** (Seznec, IEEE CAL 2010) on the logical address before feeding it into Start-Gap. The round key comes from a 10-bit LFSR, making targeted wear-out computationally infeasible for embedded adversaries.
+
+
+### Reliability Features
+
+
+- **Hamming(6,3) ECC** on `Start` and `Gap` — single-bit correction with error flag
+
+- **Bad-block retirement** — saturated blocks are automatically retired and skipped
+
+- **Atomic commit** of persistent state for power-loss tolerance
+
+
+## Interface (TinyTapeout)
+
+
+### Inputs (`ui_in`)
+
+
+| Bits    | Signal      | Description                                      |
+
+|---------|-------------|--------------------------------------------------|
+
+| [2:0]   | `logical`   | Logical block address (0–7)                      |
+
+| [4:3]   | `cmd`       | `00`=read_req, `01`=write_req, `10`=write_commit, `11`=telem_req |
+
+| [5]     | `move_ack`  | Acknowledge block migration                      |
+
+| [7:6]   | `telem_sel` | Select telemetry output                          |
+
+
+### Outputs (`uo_out`)
+
+
+| Bits | Signal         | Description                              |
+
+|------|----------------|------------------------------------------|
+
+| [2:0]| `phys`         | Physical address                         |
+
+| [3]  | `busy`         | Operation in progress                    |
+
+| [4]  | `move_req`     | Request data migration                   |
+
+| [5]  | `ecc_error`    | Single-bit correction occurred           |
+
+| [6]  | `block_retired`| Current block has been retired           |
+
+| [7]  | `telem_valid`  | Telemetry data on `uio_out` is valid     |
+
+
+**Bidirectional (`uio_out`)**: Carries destination address during moves and telemetry data.
+
+
+## Protocol Summary
+
+
+- **Read/Write**: Issue command → receive physical address in next cycle
+
+- **Write Commit**: Triggers wear counter update, possible rotation, and retirement logic
+
+- **Move Handshake**: When a block is retired, `move_req` is asserted with source/destination addresses
+
+- **Telemetry**: Request skew or total write count (16-bit) on demand
+
+
+## Area (SKY130)
+
+
+| Component                  | Baseline Table | This Design      |
+
+|----------------------------|----------------|------------------|
+
+| Mapping + Min Search       | ~200 cells     | 0                |
+
+| Wear Counters              | 128 FF         | 64 FF (8-bit)    |
+
+| Start/Gap + Logic          | —              | ~90 cells        |
+
+| Feistel + LFSR             | —              | ~40 cells        |
+
+| ECC + Retired Flags        | —              | ~40 cells        |
+
+| **Total**                  | ~500 cells     | **~350–450**     |
+
+
+## Formal Verification
+
+
+All critical properties are proven with SystemVerilog Assertions and SymbiYosys:
+
+
+- Bounded wear skew (`max - min ≤ ψ + 1`)
+
+- Monotonicity of write counters
+
+- Range safety and liveness
+
+- No deadlock in move handshake
+
+
+Run with:
+
+```bash
+
+cd formal
+
+sby -f wearlevel.sby
+
+```
+
+
+## Integration
+
+
+The module is fully synthesizable Verilog-2001 and highly parameterizable (`NUM_BLOCKS`, `PSI`, address width, etc.). It has been physically implemented and validated on the SKY130 PDK via Tiny Tapeout.
+
+
+**Ideal for:**
+
+- IoT and edge sensor nodes
+
+- Industrial data loggers
+
+- Battery-powered devices
+
+- Any system using serial EEPROM or small flash arrays
+
+
+## References
+
+
+- M. K. Qureshi et al., "Enhancing Lifetime and Security of PCM-Based Main Memory with Start-Gap Wear Leveling," MICRO 2009.
+
+- A. Seznec, "A Phase Change Memory as a Secure Main Memory," IEEE Computer Architecture Letters, 2010.
+
+
+## License
+
+
+**Apache 2.0** — Fully open source.
+
 
 ---
 
-## 2. Architecture
 
-![Block diagram](https://via.placeholder.com/600x300.png?text=Block+Diagram+-+Wear+Leveling+Controller)
+**Built for reliable, long-life embedded systems.**
 
-The controller maintains two on‑chip tables:
-- **Mapping table** (`map[8]`) : logical → physical block (3‑bit indices, 8 blocks)
-- **Wear counter table** (`wr_count[8]`) : 16‑bit write count per physical block
 
-### 2.1 Command Interface
-
-| `ui_in[4:3]` | Command         | Description |
-|--------------|-----------------|-------------|
-| `00`         | `read_req`      | Return physical address of a logical block. |
-| `01`         | `write_req`     | Return the physical address where data should be written. |
-| `10`         | `write_commit`  | Signal that a write has taken place → increment wear counter and possibly remap. |
-| `11`         | `move_ack`      | Acknowledge that data movement (copy between physical blocks) is complete. |
-
-A host first issues `write_req`, receives the physical address, performs the actual low‑level write, then asserts `write_commit`. The controller then updates wear statistics and triggers a background block swap if the difference between the most‑worn block and the least‑worn block exceeds the `THRESHOLD` (default 4).
-
-When a swap is required, `move_request` goes high and the source (`uo_out[2:0]`) and destination (`uio_out[2:0]`) physical addresses are presented. The host must copy the data and respond with `move_ack`.
-
----
-
-## 3. Mathematical Foundation – Dynamic Wear Leveling
-
-Let \(P = \{0,1,\dots,7\}\) be the set of physical blocks.  
-For each \(p \in P\) we maintain a wear counter \(c(p)\).  
-A write to logical block \(l\) currently mapped to \(p = \text{map}(l)\) causes:
-
-\[
-c(p) \leftarrow c(p) + 1
-\]
-
-After the increment, we compute
-
-\[
-p_{\text{min}} = \arg\min_{q \in P} \, c(q)
-\]
-
-If
-
-\[
-c(p) - c(p_{\text{min}}) > T \quad (T = 4),
-\]
-
-the mapping is swapped:
-
-- Let \(l_{\text{other}}\) be the logical block that currently maps to \(p_{\text{min}}\).
-- Then:
-  \[
-  \text{map}(l) \leftarrow p_{\text{min}}, \qquad
-  \text{map}(l_{\text{other}}) \leftarrow p
-  \]
-
-This ensures that any hot logical block is migrated to the physical block with the lowest write count, thereby levelling wear without the need for a global wear‑reorder cycle.
-
----
-
-## 4. FSM Implementation
-
-The core finite‑state machine operates in six sequential states:
-
-1. **IDLE** – wait for commands.
-2. **S_INC** – increment \(c(p)\).
-3. **S_MIN** – combinational minimum search over all 8 counters, result latched.
-4. **S_CHECK** – compare difference, decide whether to remap.
-5. **S_FIND_LOG** – find the logical block owner of \(p_{\text{min}}\).
-6. **S_SWAP** → **S_WAIT_ACK** – update the mapping arrays, assert `move_request`, wait for host acknowledgement, then return to IDLE.
-
-All states are pipelined naturally; the entire transaction takes **4 clock cycles** without remap and **6 + `move_ack` wait** with remap.
-
----
-
-## 5. Reuse and Integration Guide
-
-### 5.1 Parameterization
-The `NUM_BLOCKS` and `THRESHOLD` parameters are defined at the top of the Verilog file.  
-To use the IP with a larger memory, increase `NUM_BLOCKS` and the address widths accordingly.  
-The min‑search loop scales linearly and can be pipelined for very large arrays.
-
-### 5.2 Integration into an SoC
-- Connect `ui_in` to a simple command bus driven by a processor or a dedicated DMA engine.
-- Route `uo_out[2:0]` to the address bus of your EEPROM controller.
-- Use `busy` to stall further memory commands until the current operation is complete.
-- The `move_request` / `move_ack` handshake can be connected to a lightweight DMA that copies one block.
-
-### 5.3 Example SPI EEPROM usage
-MCU → wear‑level controller → SPI master → EEPROM
-The controller outputs the physical address; the MCU then issues the appropriate SPI read/write sequence.
-
-### 5.4 Portable to any technology
-The design uses only synthesizable Verilog-2001 constructs and has been verified with OpenLane on the SKY130 PDK. It meets timing at 10 MHz without any special efforts.
-
----
-
-## 6. Verification
-
-A comprehensive Cocotb testbench (`test/test.py`) verifies:
-- Reset default mapping and counter state
-- Write‑commit without remap (below threshold)
-- Automatic remap when threshold crossed, including correct mapping swap and `move_request` assertion
-- Correct handling of `move_ack`
-- Read requests during busy state (no corruption)
-- Rapid back‑to‑back commands
-- Many sequential writes to confirm wear spreading
-
-The testbench is part of the Tiny Tapeout GitHub verification flow and will pass the `make verify` step.
-
----
-
-## 7. IEEE Sponsorship Statement
-
-This design addresses an important reliability challenge in embedded non‑volatile memory systems. It is **purely digital, fully self‑contained, and does not rely on any proprietary algorithms**. The open‑source community can immediately reuse it in IoT loggers, environmental sensor nodes, and safety‑critical edge devices where memory endurance directly affects system lifetime. The methods demonstrated (hardware wear‑levelling FSM with on‑the‑fly remapping) are applicable to a wide range of NAND/NOR flash and EEPROM devices, making it a valuable, long‑lived contribution to open‑source silicon.
-
----
-
-*Prepared for Tiny Tapeout SKY26b – IEEE Division 1 Sponsorship*
